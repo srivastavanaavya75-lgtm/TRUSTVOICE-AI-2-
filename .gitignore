@@ -1,5 +1,9 @@
+.venv/
 __pycache__/
 *.pyc
-.venv/
-venv/
+
+models/speaker_registry/registry.json
+models/speaker_registry/speakers.faiss
+
 .env
+.streamlit/secrets.toml
