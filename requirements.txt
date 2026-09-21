@@ -1,0 +1,9 @@
+streamlit>=1.40,<2.0
+numpy>=1.26,<3.0
+librosa>=0.10,<1.0
+soundfile>=0.12,<1.0
+imageio-ffmpeg>=0.5,<1.0
+scikit-learn>=1.5,<2.0
+onnxruntime>=1.18,<2.0
+
+reportlab>=4.2,<5.0
