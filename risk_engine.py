@@ -2,15 +2,20 @@
 TRUSTVOICE AI
 Explainable Conversation Risk Engine
 
-Internal prototype:
-- Deterministic
-- Explainable
-- Scripted scenarios
-- Keyword/pattern based
-
-For SIH final:
-Replace the rule engine with trained ML/NLP/audio models.
+Features:
+- Dynamic sentence-by-sentence risk
+- Request intelligence
+- Social engineering detection
+- Voice authenticity signal
+- Identity verification signal
+- Risk escalation tracking
+- Explainable signals
+- Demo scenarios
 """
+
+# ============================================================
+# PATTERNS
+# ============================================================
 
 OTP_PATTERNS = [
     "otp",
@@ -51,6 +56,34 @@ PERSONAL_INFO_PATTERNS = [
     "date of birth",
 ]
 
+UPI_PIN_PATTERNS = [
+    "upi pin",
+    "upi pin number",
+]
+
+REMOTE_ACCESS_PATTERNS = [
+    "anydesk",
+    "teamviewer",
+    "remote access",
+    "screen share",
+    "share your screen",
+]
+
+LINK_PATTERNS = [
+    "click this link",
+    "open this link",
+    "click the link",
+    "open the link",
+    "send this link",
+]
+
+CARD_PATTERNS = [
+    "card number",
+    "cvv",
+    "debit card",
+    "credit card",
+]
+
 URGENCY_PATTERNS = [
     "immediately",
     "right now",
@@ -58,6 +91,8 @@ URGENCY_PATTERNS = [
     "hurry",
     "do this now",
     "as soon as possible",
+    "within 5 minutes",
+    "within five minutes",
 ]
 
 THREAT_PATTERNS = [
@@ -67,6 +102,9 @@ THREAT_PATTERNS = [
     "legal action",
     "you will lose",
     "otherwise",
+    "account will be closed",
+    "account will be suspended",
+    "case will be filed",
 ]
 
 SECRECY_PATTERNS = [
@@ -75,6 +113,7 @@ SECRECY_PATTERNS = [
     "keep this secret",
     "don't mention this",
     "no one should know",
+    "keep it between us",
 ]
 
 UNUSUAL_CHANNEL_PATTERNS = [
@@ -83,8 +122,26 @@ UNUSUAL_CHANNEL_PATTERNS = [
     "send it privately",
     "outside the usual channel",
     "different account",
+    "whatsapp me",
+    "send it on whatsapp",
 ]
 
+AUTHORITY_PATTERNS = [
+    "bank",
+    "police",
+    "government",
+    "income tax",
+    "cyber crime",
+    "security department",
+    "customer care",
+    "official",
+    "officer",
+]
+
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def matches(text, patterns):
     """
@@ -99,12 +156,30 @@ def matches(text, patterns):
     )
 
 
+def matched_patterns(text, patterns):
+    """
+    Returns all matching patterns.
+    """
+
+    text = text.lower()
+
+    return [
+        pattern
+        for pattern in patterns
+        if pattern in text
+    ]
+
+
+# ============================================================
+# RISK ENGINE
+# ============================================================
+
 class RiskEngine:
     """
     Explainable interaction-risk engine.
 
-    This prototype intentionally uses rules so judges
-    can understand exactly why a risk score changed.
+    The engine intentionally uses deterministic rules so
+    judges can understand exactly why risk changed.
     """
 
     def evaluate(
@@ -115,17 +190,20 @@ class RiskEngine:
         previous_score=None,
     ):
 
+        text = transcript.lower().strip()
+
         risk = 0
 
         signals = []
 
-        intent = "Normal conversation"
-
         behaviour = []
 
+        requests = []
+
+        intent = "Normal conversation"
 
         # ====================================================
-        # VOICE
+        # VOICE AUTHENTICITY
         # ====================================================
 
         if voice_authenticity == "SUSPICIOUS":
@@ -138,8 +216,8 @@ class RiskEngine:
 
         elif voice_authenticity == "REAL":
 
-            risk -= 3
-
+            # Small confidence adjustment only.
+            risk += 0
 
         # ====================================================
         # IDENTITY
@@ -149,30 +227,59 @@ class RiskEngine:
 
             risk += 4
 
+            signals.append(
+                "Caller identity is unverified"
+            )
 
         # ====================================================
-        # INTENT DETECTION
+        # OTP / CREDENTIAL REQUEST
         # ====================================================
 
-        if matches(
-            transcript,
-            OTP_PATTERNS
-        ):
+        if matches(text, OTP_PATTERNS):
 
-            intent = "OTP / Credential Request"
+            requests.append("OTP")
 
             risk += 30
 
             signals.append(
-                "OTP / credential request detected"
+                "OTP / verification code requested"
             )
 
-        elif matches(
-            transcript,
-            FINANCIAL_PATTERNS
-        ):
+        # ====================================================
+        # UPI PIN
+        # ====================================================
 
-            intent = "Financial Request"
+        if matches(text, UPI_PIN_PATTERNS):
+
+            requests.append("UPI PIN")
+
+            risk += 35
+
+            signals.append(
+                "UPI PIN requested"
+            )
+
+        # ====================================================
+        # PASSWORD
+        # ====================================================
+
+        if matches(text, ["password", "login password"]):
+
+            requests.append("PASSWORD")
+
+            risk += 30
+
+            signals.append(
+                "Password requested"
+            )
+
+        # ====================================================
+        # FINANCIAL REQUEST
+        # ====================================================
+
+        if matches(text, FINANCIAL_PATTERNS):
+
+            requests.append("FINANCIAL")
 
             risk += 22
 
@@ -180,41 +287,92 @@ class RiskEngine:
                 "Financial request detected"
             )
 
-        elif matches(
-            transcript,
-            SENSITIVE_PATTERNS
-        ):
+        # ====================================================
+        # BANK / CARD INFORMATION
+        # ====================================================
 
-            intent = "Sensitive Data Request"
+        if matches(text, CARD_PATTERNS):
 
-            risk += 27
+            requests.append("BANK/CARD DETAILS")
+
+            risk += 25
 
             signals.append(
-                "Sensitive data request detected"
+                "Sensitive banking/card information requested"
             )
 
-        elif matches(
-            transcript,
-            PERSONAL_INFO_PATTERNS
-        ):
+        # ====================================================
+        # PERSONAL INFORMATION
+        # ====================================================
 
-            intent = "Personal Information Request"
+        if matches(text, PERSONAL_INFO_PATTERNS):
+
+            requests.append("PERSONAL INFORMATION")
 
             risk += 16
 
             signals.append(
-                "Personal information request detected"
+                "Personal information requested"
             )
 
+        # ====================================================
+        # SENSITIVE DATA
+        # ====================================================
+
+        if matches(text, SENSITIVE_PATTERNS):
+
+            requests.append("SENSITIVE DATA")
+
+            risk += 27
+
+            signals.append(
+                "Sensitive/confidential data requested"
+            )
 
         # ====================================================
-        # SOCIAL ENGINEERING
+        # REMOTE ACCESS
         # ====================================================
 
-        if matches(
-            transcript,
-            URGENCY_PATTERNS
-        ):
+        if matches(text, REMOTE_ACCESS_PATTERNS):
+
+            requests.append("REMOTE ACCESS")
+
+            risk += 32
+
+            signals.append(
+                "Remote device/screen access requested"
+            )
+
+        # ====================================================
+        # SUSPICIOUS LINK
+        # ====================================================
+
+        if matches(text, LINK_PATTERNS):
+
+            requests.append("SUSPICIOUS LINK")
+
+            risk += 18
+
+            signals.append(
+                "Suspicious link interaction requested"
+            )
+
+        # ====================================================
+        # INTENT LABEL
+        # ====================================================
+
+        if requests:
+
+            intent = " / ".join(
+                f"{request} REQUEST"
+                for request in requests
+            )
+
+        # ====================================================
+        # URGENCY
+        # ====================================================
+
+        if matches(text, URGENCY_PATTERNS):
 
             risk += 18
 
@@ -226,11 +384,11 @@ class RiskEngine:
                 "Urgency detected"
             )
 
+        # ====================================================
+        # THREAT
+        # ====================================================
 
-        if matches(
-            transcript,
-            THREAT_PATTERNS
-        ):
+        if matches(text, THREAT_PATTERNS):
 
             risk += 20
 
@@ -242,11 +400,11 @@ class RiskEngine:
                 "Threatening language detected"
             )
 
+        # ====================================================
+        # SECRECY
+        # ====================================================
 
-        if matches(
-            transcript,
-            SECRECY_PATTERNS
-        ):
+        if matches(text, SECRECY_PATTERNS):
 
             risk += 24
 
@@ -258,11 +416,11 @@ class RiskEngine:
                 "Secrecy request detected"
             )
 
+        # ====================================================
+        # UNUSUAL CHANNEL
+        # ====================================================
 
-        if matches(
-            transcript,
-            UNUSUAL_CHANNEL_PATTERNS
-        ):
+        if matches(text, UNUSUAL_CHANNEL_PATTERNS):
 
             risk += 20
 
@@ -271,64 +429,109 @@ class RiskEngine:
             )
 
             signals.append(
-                "Unusual delivery channel detected"
+                "Unusual communication channel detected"
             )
 
-
         # ====================================================
-        # AUTHORITY CLAIM
+        # AUTHORITY IMPERSONATION
         # ====================================================
 
         if (
-            "bank" in transcript.lower()
+            matches(text, AUTHORITY_PATTERNS)
             and identity == "UNVERIFIED"
         ):
 
-            risk += 8
+            risk += 12
+
+            behaviour.append(
+                "Authority claim"
+            )
 
             signals.append(
                 "Authority claim from unverified caller"
             )
 
+        # ====================================================
+        # MULTIPLE DANGER SIGNALS
+        # ====================================================
+
+        danger_count = (
+            len(requests)
+            + len(behaviour)
+        )
+
+        if danger_count >= 3:
+
+            risk += 10
+
+            signals.append(
+                "Multiple social-engineering indicators detected"
+            )
 
         # ====================================================
-        # KILLER FEATURE
-        #
-        # Real voice + verified identity
-        # does NOT guarantee a safe interaction.
+        # VERIFIED DOES NOT MEAN SAFE
         # ====================================================
 
         if (
             identity == "VERIFIED"
             and (
-                matches(
-                    transcript,
-                    SENSITIVE_PATTERNS
-                )
-                or matches(
-                    transcript,
-                    SECRECY_PATTERNS
-                )
-                or matches(
-                    transcript,
-                    UNUSUAL_CHANNEL_PATTERNS
-                )
+                requests
+                or matches(text, SECRECY_PATTERNS)
+                or matches(text, UNUSUAL_CHANNEL_PATTERNS)
             )
         ):
 
             risk += 15
 
             signals.append(
-                "Verified identity but request "
-                "is contextually unusual"
+                "Verified identity but request is contextually unusual"
             )
 
+        # ====================================================
+        # AI VOICE + SENSITIVE REQUEST
+        # ====================================================
+
+        if (
+            voice_authenticity == "SUSPICIOUS"
+            and requests
+        ):
+
+            risk += 15
+
+            signals.append(
+                "Synthetic voice combined with sensitive request"
+            )
 
         # ====================================================
-        # SCORE
+        # ESCALATION BONUS
         # ====================================================
 
-        calculated_score = max(
+        if previous_score is not None:
+
+            # Previous score is TRUST SCORE.
+            # Lower score = higher risk.
+
+            if previous_score >= 70 and risk >= 40:
+
+                risk += 8
+
+                signals.append(
+                    "Conversation escalated from low risk to elevated risk"
+                )
+
+            elif previous_score >= 50 and risk >= 55:
+
+                risk += 8
+
+                signals.append(
+                    "Conversation escalation detected"
+                )
+
+        # ====================================================
+        # FINAL TRUST SCORE
+        # ====================================================
+
+        score = max(
             0,
             min(
                 100,
@@ -336,18 +539,25 @@ class RiskEngine:
             )
         )
 
-
-        # Scripted scores make the internal demonstration
-        # repeatable and visually consistent.
+        # ====================================================
+        # ESCALATION MESSAGE
+        # ====================================================
 
         if previous_score is not None:
 
-            score = previous_score
+            if score < previous_score:
 
-        else:
+                signals.append(
+                    f"Trust score decreased from "
+                    f"{previous_score} to {score}"
+                )
 
-            score = calculated_score
+            elif score > previous_score:
 
+                signals.append(
+                    f"Trust score increased from "
+                    f"{previous_score} to {score}"
+                )
 
         # ====================================================
         # STATUS
@@ -373,9 +583,32 @@ class RiskEngine:
 
             status = "CRITICAL"
 
+        # ====================================================
+        # RECOMMENDED ACTION
+        # ====================================================
+
+        if score >= 85:
+
+            action = "CONTINUE"
+
+        elif score >= 65:
+
+            action = "VERIFY CALLER"
+
+        elif score >= 45:
+
+            action = "ADDITIONAL VERIFICATION"
+
+        elif score >= 20:
+
+            action = "HOLD SENSITIVE ACTION"
+
+        else:
+
+            action = "STOP / BLOCK REQUEST"
 
         # ====================================================
-        # RESULT
+        # RETURN RESULT
         # ====================================================
 
         return {
@@ -385,6 +618,10 @@ class RiskEngine:
             "status": status,
 
             "intent": intent,
+
+            "requests": list(
+                dict.fromkeys(requests)
+            ),
 
             "behaviour": (
                 " + ".join(behaviour)
@@ -396,6 +633,9 @@ class RiskEngine:
             "signals": list(
                 dict.fromkeys(signals)
             ),
+
+            "action": action,
+
         }
 
 
@@ -404,7 +644,6 @@ class RiskEngine:
 # ============================================================
 
 SCENARIOS = {
-
 
     # ========================================================
     # SCENARIO A
@@ -488,7 +727,6 @@ SCENARIOS = {
         ],
     },
 
-
     # ========================================================
     # SCENARIO B
     # ========================================================
@@ -552,6 +790,138 @@ SCENARIOS = {
                 "voice": "REAL",
 
                 "identity": "VERIFIED",
+
+            },
+
+        ],
+    },
+
+    # ========================================================
+    # SCENARIO C
+    # ========================================================
+
+    "C": {
+
+        "title":
+            "Scenario C · AI Voice + OTP Scam",
+
+        "steps": [
+
+            {
+
+                "text":
+                    "Hello, I am calling from the bank security team.",
+
+                "score": 72,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Your account has unusual activity.",
+
+                "score": 55,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Please tell me the OTP you just received.",
+
+                "score": 25,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Tell me immediately or your account will be blocked.",
+
+                "score": 5,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+        ],
+    },
+
+    # ========================================================
+    # SCENARIO D
+    # ========================================================
+
+    "D": {
+
+        "title":
+            "Scenario D · Remote Access Scam",
+
+        "steps": [
+
+            {
+
+                "text":
+                    "I am calling from customer support.",
+
+                "score": 78,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Your account needs immediate verification.",
+
+                "score": 55,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Install AnyDesk and give me remote access.",
+
+                "score": 18,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
+
+            },
+
+            {
+
+                "text":
+                    "Do it right now otherwise your account will be blocked.",
+
+                "score": 3,
+
+                "voice": "SUSPICIOUS",
+
+                "identity": "UNVERIFIED",
 
             },
 

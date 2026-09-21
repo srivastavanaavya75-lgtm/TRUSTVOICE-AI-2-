@@ -15,6 +15,11 @@ from pathlib import Path
 import streamlit as st
 
 try:
+    from risk_engine import RiskEngine as DedicatedRiskEngine
+except Exception:
+    DedicatedRiskEngine = None
+
+try:
     from reportlab.lib import colors as pdf_colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import A4
@@ -226,6 +231,12 @@ def init_state():
         "transcript_language": None,
         "transcript_source": None,
         "conversation_id": None,
+        "risk_timeline": [],
+        "request_intelligence": {},
+        "social_engineering": {},
+        "fusion_breakdown": {},
+        "adaptive_handshake": None,
+        "simulator_running": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -300,6 +311,165 @@ def fuse_with_gates(factors: dict):
             caps.append(reason)
 
     return int(capped), caps
+
+
+# ============================================================
+# CONVERSATION FIREWALL | REQUEST INTELLIGENCE + SOCIAL ENGINEERING
+# ============================================================
+
+REQUEST_INTELLIGENCE_PATTERNS = {
+    "OTP / Verification Code": [r"\botp\b", r"one[- ]?time password", r"verification code", r"security code", r"six[- ]?digit code"],
+    "UPI PIN": [r"\bupi\s*pin\b", r"upi.*pin", r"pin.*upi"],
+    "Password / Login": [r"password", r"net banking", r"login credentials", r"passcode"],
+    "Card / CVV": [r"\bcvv\b", r"card number", r"debit card", r"credit card", r"expiry date"],
+    "Money Transfer": [r"transfer", r"send the money", r"make the payment", r"wire the amount", r"upi transfer", r"bank account"],
+    "Personal Information": [r"aadhaar", r"pan card", r"date of birth", r"address", r"mother.?s maiden", r"personal (details|information)"],
+    "Sensitive Data": [r"employee database", r"customer records", r"confidential files", r"salary sheet", r"kyc documents", r"internal audit"],
+    "Remote Access": [r"anydesk", r"teamviewer", r"remote access", r"screen share", r"install.*app", r"remote desktop", r"rustdesk"],
+    "Suspicious Link": [r"click (this|the) link", r"open (this|the) link", r"link.*verify", r"shortened link", r"bit\.ly", r"tinyurl"],
+}
+
+SOCIAL_ENGINEERING_PATTERNS = {
+    "Authority impersonation": [r"bank security", r"police", r"income tax", r"government", r"cyber cell", r"fraud team", r"security department", r"manager", r"boss"],
+    "Urgency pressure": [r"immediately", r"right now", r"urgent", r"hurry", r"quickly", r"within \d+ (minutes?|hours?)", r"today itself"],
+    "Threat / fear": [r"account.*(block|freeze|suspend|close)", r"legal action", r"arrest", r"penalty", r"police case", r"you will lose", r"otherwise"],
+    "Secrecy / isolation": [r"do not tell", r"don't tell", r"keep this secret", r"between us", r"do not disconnect", r"don't hang up", r"stay on the line"],
+    "Verification bypass": [r"no need to verify", r"skip verification", r"trust me", r"don't call back", r"no need to check"],
+    "Artificial deadline": [r"last chance", r"final warning", r"expires today", r"within 10 minutes", r"before evening"],
+}
+
+
+def _pattern_hits(text: str, groups: dict):
+    clean = _clean_text(text)
+    hits = []
+    for label, patterns in groups.items():
+        matched = [p for p in patterns if re.search(p, clean, flags=re.IGNORECASE)]
+        if matched:
+            hits.append(label)
+    return hits
+
+
+def analyze_request_intelligence(text: str):
+    hits = _pattern_hits(text, REQUEST_INTELLIGENCE_PATTERNS)
+    primary = hits[0] if hits else "No sensitive request detected"
+    return {
+        "primary_request": primary,
+        "requests": hits,
+        "request_count": len(hits),
+        "sensitive": bool(hits),
+        "highest_severity": "CRITICAL" if any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"]) else ("HIGH" if hits else "LOW"),
+    }
+
+
+def analyze_social_engineering(text: str):
+    hits = _pattern_hits(text, SOCIAL_ENGINEERING_PATTERNS)
+    # Combination signal is intentionally stronger than isolated cues.
+    severity = min(100, len(hits) * 18 + max(0, len(hits) - 2) * 10)
+    return {
+        "signals": hits,
+        "count": len(hits),
+        "severity": severity,
+        "level": "CRITICAL" if severity >= 70 else ("HIGH" if severity >= 40 else ("LOW" if severity == 0 else "MEDIUM")),
+    }
+
+
+def conversation_firewall_score(factors: dict, text: str, previous_score=None):
+    """Fuse voice, identity and conversation evidence into a 0-100 trust score."""
+    request = analyze_request_intelligence(text)
+    social = analyze_social_engineering(text)
+    fused, caps = fuse_with_gates(factors)
+
+    risk_components = {
+        "Voice": round(100 - float(factors.get("Voice Authenticity", 94)), 1),
+        "Speaker": round(100 - float(factors.get("Speaker Identity", 94)), 1),
+        "Intent": round(100 - float(factors.get("Intent Safety", 94)), 1),
+        "Behavior": round(100 - float(factors.get("Behavior Safety", 94)), 1),
+        "Context": round(100 - float(factors.get("Context Safety", 94)), 1),
+    }
+
+    weighted_risk = (
+        risk_components["Voice"] * 0.20 +
+        risk_components["Speaker"] * 0.20 +
+        risk_components["Intent"] * 0.25 +
+        risk_components["Behavior"] * 0.20 +
+        risk_components["Context"] * 0.15
+    )
+
+    extra = 0.0
+    if request["requests"]:
+        extra += min(12, request["request_count"] * 4)
+    if social["count"] >= 2:
+        extra += 8
+    if social["count"] >= 4:
+        extra += 8
+    if request["primary_request"] in {"OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"}:
+        extra += 8
+
+    # Escalation is based on a worsening trajectory, not a fake fixed score.
+    if previous_score is not None and weighted_risk > (100 - float(previous_score)) + 8:
+        extra += 5
+
+    risk = min(100, max(float(weighted_risk), weighted_risk + extra))
+    trust = int(round(100 - risk))
+
+    if trust >= 75:
+        level, action = "LOW", "CONTINUE / MONITOR"
+    elif trust >= 50:
+        level, action = "MEDIUM", "VERIFY CALLER"
+    elif trust >= 30:
+        level, action = "HIGH", "HOLD SENSITIVE ACTION"
+    else:
+        level, action = "CRITICAL", "STOP / BLOCK REQUEST"
+
+    if caps:
+        trust = min(trust, int(fused))
+
+    breakdown = {
+        "weighted_risk": round(weighted_risk, 1),
+        "additional_risk": round(extra, 1),
+        "risk_components": risk_components,
+        "request_intelligence": request,
+        "social_engineering": social,
+        "caps": caps,
+        "trust_score": int(max(0, min(100, trust))),
+        "risk_level": level,
+        "action": action,
+    }
+    return breakdown
+
+
+def record_risk_event(score: int, trigger: str, transcript: str, source="analysis"):
+    item = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "score": int(max(0, min(100, score))),
+        "risk": risk_label(int(score))[0],
+        "trigger": str(trigger),
+        "transcript": str(transcript)[:220],
+        "source": source,
+    }
+    st.session_state.risk_timeline.append(item)
+    st.session_state.risk_timeline = st.session_state.risk_timeline[-30:]
+
+
+def apply_conversation_firewall(text: str, previous_score=None):
+    result = conversation_firewall_score(st.session_state.factors, text, previous_score)
+    st.session_state.request_intelligence = result["request_intelligence"]
+    st.session_state.social_engineering = result["social_engineering"]
+    st.session_state.fusion_breakdown = result
+    st.session_state.score = int(result["trust_score"])
+    st.session_state.action_status = result["action"]
+    st.session_state.risk_explanation = list(dict.fromkeys(
+        list(result["caps"]) +
+        list(result["social_engineering"].get("signals", [])) +
+        list(result["request_intelligence"].get("requests", []))
+    ))
+    record_risk_event(
+        st.session_state.score,
+        result["action"],
+        text,
+        "conversation_firewall",
+    )
+    return result
 
 
 # ============================================================
@@ -614,27 +784,36 @@ def describe_intent(intent) -> str:
 
 
 def apply_event(score, title, detail, tag, factors, transcript, sleep_s=0.0):
-    st.session_state.score = int(score)
     st.session_state.factors = dict(factors)
     st.session_state.transcript = transcript
+    st.session_state.intent_prediction = analyse_conversation(transcript)["intent_prediction"]
 
-    text_analysis = analyse_conversation(transcript)
-    st.session_state.intent_prediction = text_analysis["intent_prediction"]
+    dynamic = conversation_firewall_score(st.session_state.factors, transcript, st.session_state.get("score"))
+    # Demo event scores provide the intended stage signal, while the firewall
+    # independently records the evidence behind that stage.
+    st.session_state.score = int(min(score, dynamic["trust_score"]))
+    st.session_state.request_intelligence = dynamic["request_intelligence"]
+    st.session_state.social_engineering = dynamic["social_engineering"]
+    st.session_state.fusion_breakdown = dynamic
     st.session_state.current_event = (title, detail, tag)
-    st.session_state.risk_explanation = text_analysis["reasons"]
-
-    if score >= 75:
+    st.session_state.risk_explanation = list(dict.fromkeys(
+        list(dynamic["caps"]) +
+        list(dynamic["social_engineering"].get("signals", [])) +
+        list(dynamic["request_intelligence"].get("requests", []))
+    ))
+    if st.session_state.score >= 75:
         st.session_state.scenario = "Safe Conversation"
-        st.session_state.action_status = "Monitoring"
-    elif score >= 40:
+        st.session_state.action_status = "CONTINUE / MONITOR"
+    elif st.session_state.score >= 50:
         st.session_state.scenario = "Suspicious Interaction"
-        st.session_state.action_status = "Independent verification recommended"
+        st.session_state.action_status = "VERIFY CALLER"
+    elif st.session_state.score >= 30:
+        st.session_state.scenario = "High-Risk / Dangerous Request"
+        st.session_state.action_status = "HOLD SENSITIVE ACTION"
     else:
         st.session_state.scenario = "High-Risk / Dangerous Request"
-        st.session_state.action_status = (
-            "Restrict sensitive action · Independent confirmation required"
-        )
-
+        st.session_state.action_status = "STOP / BLOCK REQUEST"
+    record_risk_event(st.session_state.score, f"{tag}: {detail}", transcript, "live_scenario")
     if sleep_s:
         time.sleep(sleep_s)
 
@@ -1333,6 +1512,7 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
 
 
 def _apply_transcript_analysis(transcript: str):
+    previous_score = st.session_state.get("score") if st.session_state.get("analysis_done") else None
     analysis = analyse_conversation(transcript.strip())
     st.session_state.transcript = transcript.strip()
     st.session_state.intent_prediction = analysis.get("intent_prediction")
@@ -1341,27 +1521,38 @@ def _apply_transcript_analysis(transcript: str):
             key, st.session_state.factors.get(key, 94)
         )
 
-    fused, caps = fuse_with_gates(st.session_state.factors)
     anti = (st.session_state.get("last_analysis") or {}).get("anti_spoof") or {}
     spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
     similarity = float((st.session_state.get("speaker_match") or {}).get("similarity", 0.0) or 0.0)
 
+    if spoof >= 70:
+        st.session_state.factors["Voice Authenticity"] = min(
+            st.session_state.factors.get("Voice Authenticity", 94), 25
+        )
+    if similarity >= 80:
+        st.session_state.factors["Speaker Identity"] = min(
+            st.session_state.factors.get("Speaker Identity", 94), 45
+        )
+
+    result = apply_conversation_firewall(transcript.strip(), previous_score)
+
     if spoof >= 70 and similarity >= 80:
-        fused = min(fused, 15)
+        st.session_state.score = min(st.session_state.score, 15)
         st.session_state.scenario = "Potential Voice-Cloning Impersonation"
-        st.session_state.action_status = "Trust Handshake required · Sensitive action restricted"
+        st.session_state.action_status = "STOP / BLOCK REQUEST · TRUST HANDSHAKE REQUIRED"
         st.session_state.risk_explanation.extend([
             "AI-generated / spoofed voice detected.",
             "High registered-speaker similarity detected.",
             "Potential voice-cloning impersonation attack.",
         ])
+    elif st.session_state.score < 30:
+        st.session_state.scenario = "High-Risk / Dangerous Request"
+    elif st.session_state.score < 50:
+        st.session_state.scenario = "Suspicious Interaction"
+    else:
+        st.session_state.scenario = "Conversation Risk Assessment"
 
-    st.session_state.score = int(fused)
-    st.session_state.risk_explanation = list(dict.fromkeys(
-        list(st.session_state.get("risk_explanation", []))
-        + list(caps)
-        + list(analysis.get("reasons", []))
-    ))
+    st.session_state.risk_explanation = list(dict.fromkeys(st.session_state.risk_explanation))
     st.session_state.analysis_done = True
     return analysis
 
@@ -2081,6 +2272,7 @@ with st.sidebar:
         ("◌", "Voice Registry"),
         ("◇", "Demo Audio & Conversations"),
         ("◈", "Threat Detection"),
+        ("⚡", "Attack Simulator"),
         ("◷", "Call History"),
         ("◎", "AI Intelligence"),
         ("◇", "Trust Handshake"),
@@ -2491,13 +2683,36 @@ elif nav == "Live Analysis":
         </div>
         """)
 
-    score = int(st.session_state.score)
-    risk, _ = risk_label(score)
+    # Do not show the neutral baseline as a real analysis result.
+    # The internal 94 baseline is used only for fusion/demo initialization.
+    # Until an actual live recording or scripted scenario is analyzed,
+    # the UI must remain in an explicit awaiting state.
+    has_live_analysis = bool(
+        st.session_state.get("last_analysis")
+        or st.session_state.get("analysis_done")
+    )
+
+    if has_live_analysis:
+        score = int(st.session_state.score)
+        risk, _ = risk_label(score)
+        live_score_html = f"""
+        <div class="ring" style="--pct:{score}%">
+          <div><div class="ring-num">{score}</div><div class="ring-small">/ 100</div></div>
+        </div>
+        <span class="badge">{escape(risk.upper())} RISK</span>
+        """
+    else:
+        live_score_html = """
+        <div class="ring" style="--pct:0%">
+          <div><div class="ring-num">—</div><div class="ring-small">/ 100</div></div>
+        </div>
+        <span class="badge">AWAITING INPUT</span>
+        """
+
     render(f"""
     <div class="card" style="margin-top:15px;text-align:center">
       <div class="card-title">LIVE TRUST SCORE</div>
-      <div class="ring" style="--pct:{score}%"><div><div class="ring-num">{score}</div><div class="ring-small">/ 100</div></div></div>
-      <span class="badge">{escape(risk.upper())} RISK</span>
+      {live_score_html}
       <div class="quote"><strong>Core security insight:</strong> A real voice can still be used to make a dangerous request.</div>
     </div>
     """)
@@ -2872,6 +3087,7 @@ else:
     page_titles = {
         "Voice Registry": ("IDENTITY LAYER", "Registered Voice Registry", "Enroll trusted speakers and build a local voice-identity index."),
         "Threat Detection": ("THREAT INTELLIGENCE", "Threat Detection", "Voice-cloning indicators, social-engineering patterns and risk thresholds."),
+        "Attack Simulator": ("CONVERSATION FIREWALL", "Attack Simulator", "Sentence-by-sentence risk escalation, request intelligence and adaptive intervention."),
         "AI Intelligence": ("MODEL STACK", "AI Intelligence", "Modular AI architecture for anti-spoofing, speaker verification, intent and risk fusion."),
         "Trust Handshake": ("INDEPENDENT VERIFICATION", "Trust Handshake", "A second-channel confirmation step for high-risk identity claims and sensitive actions."),
         "Reports": ("SECURITY EVIDENCE", "Reports", "Explainable incident records and audit-ready decision summaries."),
@@ -2956,15 +3172,15 @@ else:
             st.session_state.intent_prediction = intent
             for key in ["Intent Safety", "Behavior Safety", "Context Safety"]:
                 st.session_state.factors[key] = analysis[key]
-            fused, caps = fuse_with_gates(st.session_state.factors)
+            previous = st.session_state.get("score") if st.session_state.get("analysis_done") else None
+            fused_result = apply_conversation_firewall(probe.strip(), previous)
+            fused = int(fused_result["trust_score"])
             st.session_state.score = fused
-            st.session_state.risk_explanation = caps + analysis["reasons"]
+            st.session_state.risk_explanation = list(dict.fromkeys(
+                fused_result["caps"] + fused_result["social_engineering"]["signals"] + fused_result["request_intelligence"]["requests"]
+            ))
             st.session_state.scenario = "Conversation Risk Assessment"
-            st.session_state.action_status = (
-                "Monitoring" if fused >= 75 else
-                "Independent verification recommended" if fused >= 40 else
-                "Restrict sensitive action · Independent confirmation required"
-            )
+            st.session_state.action_status = fused_result["action"]
             add_history(
                 "Conversation Scoring",
                 fused,
@@ -2994,6 +3210,156 @@ else:
                     + items
                     + f'<div class="quote">{escape(str(intent.get("riskiest_utterance","")))}</div></div>'
                 )
+
+    elif nav == "Attack Simulator":
+        render("""
+        <div class="card">
+          <div class="card-title">CONVERSATION FIREWALL · ATTACK SIMULATOR</div>
+          <div class="details">This is a controlled demonstration. Each utterance is scored independently, then fused with voice and identity signals. It does not claim to intercept a cellular call.</div>
+        </div>
+        """)
+
+        simulator_scenarios = {
+            "🟢 SAFE · Normal call": {
+                "voice": 96, "speaker": 94,
+                "lines": [
+                    "Hi, I am calling to confirm tomorrow's meeting time.",
+                    "Please send me the agenda when you get a chance.",
+                    "Thanks, I will review it and call you back later.",
+                ],
+            },
+            "🟠 MEDIUM · Account support": {
+                "voice": 92, "speaker": 88,
+                "lines": [
+                    "I am calling about an unusual login on your account.",
+                    "Please confirm a few account details so we can review it.",
+                    "We normally complete verification through the official support channel.",
+                ],
+            },
+            "🔴 CRITICAL · AI voice + OTP impersonation": {
+                "voice": 18, "speaker": 18,
+                "lines": [
+                    "Hello, I am calling from your bank security department.",
+                    "Your account has been flagged and I need to verify your details.",
+                    "Tell me the OTP immediately so I can secure the account.",
+                    "Do not disconnect and do not tell anyone about this call.",
+                    "Do it right now or your account will be blocked.",
+                ],
+            },
+            "🔴 CRITICAL · Remote access scam": {
+                "voice": 82, "speaker": 78,
+                "lines": [
+                    "I am from technical support and your device has a security issue.",
+                    "Install AnyDesk so I can remotely fix the problem.",
+                    "Open the remote access session and stay on the call.",
+                    "Do not close the session until I finish the verification.",
+                ],
+            },
+        }
+
+        selected = st.selectbox("Select controlled scenario", list(simulator_scenarios.keys()), key="attack_sim_select")
+        sim = simulator_scenarios[selected]
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Voice signal", f"{sim['voice']}/100")
+        with col2:
+            st.metric("Speaker signal", f"{sim['speaker']}/100")
+
+        if st.button("▶ RUN ATTACK SIMULATION", use_container_width=True, key="run_attack_sim"):
+            st.session_state.risk_timeline = []
+            st.session_state.analysis_done = True
+            st.session_state.factors = dict(NEUTRAL_FACTORS)
+            st.session_state.factors["Voice Authenticity"] = sim["voice"]
+            st.session_state.factors["Speaker Identity"] = sim["speaker"]
+            placeholder = st.empty()
+            cumulative = ""
+            previous = 94
+            for idx, line in enumerate(sim["lines"], 1):
+                cumulative = (cumulative + " " + line).strip()
+                text_analysis = analyse_conversation(cumulative)
+                st.session_state.factors["Intent Safety"] = text_analysis["Intent Safety"]
+                st.session_state.factors["Behavior Safety"] = text_analysis["Behavior Safety"]
+                st.session_state.factors["Context Safety"] = text_analysis["Context Safety"]
+                result = conversation_firewall_score(st.session_state.factors, cumulative, previous)
+                score = result["trust_score"]
+                previous = score
+                st.session_state.score = score
+                st.session_state.transcript = cumulative
+                st.session_state.intent_prediction = text_analysis["intent_prediction"]
+                st.session_state.request_intelligence = result["request_intelligence"]
+                st.session_state.social_engineering = result["social_engineering"]
+                st.session_state.fusion_breakdown = result
+                st.session_state.risk_explanation = list(dict.fromkeys(
+                    result["caps"] + result["social_engineering"]["signals"] + result["request_intelligence"]["requests"]
+                ))
+                record_risk_event(score, result["action"], line, "attack_simulator")
+                risk, _ = risk_label(score)
+                placeholder.markdown(f"""
+                <div class="card" style="margin-top:14px;text-align:center">
+                  <div class="card-head"><div class="card-title">STEP {idx} · {escape(risk.upper())}</div><div class="card-kicker">{escape(result['action'])}</div></div>
+                  <div class="ring" style="--pct:{score}%"><div><div class="ring-num">{score}</div><div class="ring-small">TRUST / 100</div></div></div>
+                  <div class="quote">{escape(line)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                time.sleep(0.75)
+
+            st.session_state.scenario = "Attack Simulation Complete"
+            st.session_state.action_status = result["action"]
+            st.session_state.last_analysis = {
+                "conversation_id": f"TV-SIM-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                "file": "controlled-attack-simulation",
+                "format": "TEXT",
+                "file_hash": hashlib.sha256(cumulative.encode()).hexdigest()[:16],
+                "transcript": cumulative,
+                "anti_spoof": {"verdict": "SIMULATED", "bona_fide_probability": sim["voice"]},
+                "speaker_match": {"similarity": sim["speaker"]},
+                "simulation": selected,
+            }
+            add_history("Attack Simulator", int(st.session_state.score), f"{selected} · {st.session_state.action_status}")
+            st.rerun()
+
+        if st.session_state.get("risk_timeline"):
+            st.markdown("### Risk Escalation Timeline")
+            timeline_rows = []
+            for item in st.session_state.risk_timeline:
+                timeline_rows.append({
+                    "Time": item["time"],
+                    "Trust": item["score"],
+                    "Risk": item["risk"],
+                    "Trigger": item["trigger"],
+                    "Evidence": item["transcript"],
+                })
+            st.dataframe(timeline_rows, use_container_width=True, hide_index=True)
+
+            req = st.session_state.get("request_intelligence") or {}
+            soc = st.session_state.get("social_engineering") or {}
+            fusion = st.session_state.get("fusion_breakdown") or {}
+            c1, c2 = st.columns(2)
+            with c1:
+                render(f"""
+                <div class="card">
+                  <div class="card-title">REQUEST INTELLIGENCE</div>
+                  <div class="metric-row"><span>Primary request</span><span>{escape(str(req.get('primary_request','—')))}</span></div>
+                  <div class="metric-row"><span>Severity</span><span>{escape(str(req.get('highest_severity','—')))}</span></div>
+                  <div class="metric-row"><span>Detected requests</span><span>{escape(', '.join(req.get('requests',[])) or 'None')}</span></div>
+                </div>
+                """)
+            with c2:
+                render(f"""
+                <div class="card">
+                  <div class="card-title">SOCIAL ENGINEERING</div>
+                  <div class="metric-row"><span>Level</span><span>{escape(str(soc.get('level','—')))}</span></div>
+                  <div class="metric-row"><span>Signals</span><span>{escape(', '.join(soc.get('signals',[])) or 'None')}</span></div>
+                  <div class="metric-row"><span>Severity</span><span>{int(soc.get('severity',0))}/100</span></div>
+                </div>
+                """)
+
+            components = (fusion.get("risk_components") or {})
+            rows = "".join(
+                f'<div class="metric-row"><span>{escape(str(k))}</span><span>{float(v):.1f} risk</span></div>'
+                for k, v in components.items()
+            )
+            render(f'<div class="card" style="margin-top:12px"><div class="card-title">EXPLAINABLE RISK FUSION</div>{rows}<div class="quote">{escape(str(fusion.get("action","—")))}</div></div>')
 
     elif nav == "Trust Handshake":
         render("""

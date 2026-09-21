@@ -33,7 +33,9 @@ except ImportError:
     except ImportError:
         EncoderClassifier = None
 
+
 BASE_DIR = Path(__file__).resolve().parent
+
 REGISTRY_DIR = BASE_DIR / "models" / "speaker_registry"
 REGISTRY_FILE = REGISTRY_DIR / "registry.json"
 INDEX_FILE = REGISTRY_DIR / "speakers.faiss"
@@ -41,178 +43,447 @@ INDEX_FILE = REGISTRY_DIR / "speakers.faiss"
 SAMPLE_RATE = 16000
 MATCH_THRESHOLD = 0.65
 EMBEDDING_DIM = 192
+
 _MODEL = None
 
 
 def _ensure_registry() -> None:
     REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+
     if not REGISTRY_FILE.exists():
         REGISTRY_FILE.write_text(
-            json.dumps({"version": 1, "speakers": {}}, indent=2),
+            json.dumps(
+                {"version": 1, "speakers": {}},
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
 
 def load_registry() -> dict[str, Any]:
     _ensure_registry()
+
     try:
-        return json.loads(REGISTRY_FILE.read_text(encoding="utf-8"))
+        data = json.loads(
+            REGISTRY_FILE.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(data, dict):
+            raise ValueError("Registry root must be an object.")
+
+        data.setdefault("version", 1)
+        data.setdefault("speakers", {})
+
+        if not isinstance(data["speakers"], dict):
+            data["speakers"] = {}
+
+        return data
+
     except Exception:
-        return {"version": 1, "speakers": {}}
+        return {
+            "version": 1,
+            "speakers": {},
+        }
 
 
 def save_registry(registry: dict[str, Any]) -> None:
     _ensure_registry()
-    REGISTRY_FILE.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+
+    REGISTRY_FILE.write_text(
+        json.dumps(registry, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _require_models() -> None:
     if EncoderClassifier is None:
-        raise RuntimeError("SpeechBrain is not installed. Run: pip install speechbrain")
+        raise RuntimeError(
+            "SpeechBrain is not installed. "
+            "Run: pip install speechbrain"
+        )
+
     if torch is None:
         raise RuntimeError("PyTorch is not installed.")
+
     if librosa is None:
         raise RuntimeError("librosa is not installed.")
 
 
 def _get_model():
     global _MODEL
+
     _require_models()
+
     if _MODEL is None:
         _MODEL = EncoderClassifier.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=str(BASE_DIR / "models" / "ecapa_voxceleb"),
+            savedir=str(
+                BASE_DIR / "models" / "ecapa_voxceleb"
+            ),
             run_opts={"device": "cpu"},
         )
+
     return _MODEL
 
 
-def decode_audio(raw: bytes, filename: str) -> np.ndarray:
+def decode_audio(
+    raw: bytes,
+    filename: str,
+) -> np.ndarray:
+    """Decode audio and return mono 16 kHz float32 samples."""
+
     _require_models()
-    suffix = Path(filename).suffix.lower()
-    allowed = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
-    if suffix not in allowed:
-        raise ValueError("Supported speaker audio: WAV, MP3, M4A, FLAC, OGG, WEBM.")
+
     if not raw:
         raise ValueError("Empty audio input.")
 
-    y, _ = librosa.load(io.BytesIO(raw), sr=SAMPLE_RATE, mono=True)
-    y = np.asarray(y, dtype=np.float32)
-    y = np.nan_to_num(y)
+    suffix = Path(filename).suffix.lower()
 
-    if y.size < SAMPLE_RATE:
-        raise ValueError("Audio must contain at least one second of speech.")
+    allowed = {
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".flac",
+        ".ogg",
+        ".webm",
+        ".aac",
+    }
 
-    intervals = librosa.effects.split(y, top_db=30)
+    if suffix not in allowed:
+        raise ValueError(
+            "Supported speaker audio: "
+            "WAV, MP3, M4A, FLAC, OGG, WEBM, AAC."
+        )
+
+    try:
+        audio, _ = librosa.load(
+            io.BytesIO(raw),
+            sr=SAMPLE_RATE,
+            mono=True,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Could not decode the audio. "
+            "Please upload a valid audio file."
+        ) from exc
+
+    audio = np.asarray(
+        audio,
+        dtype=np.float32,
+    )
+
+    audio = np.nan_to_num(audio)
+
+    if audio.size < SAMPLE_RATE:
+        raise ValueError(
+            "Audio must contain at least one second of speech."
+        )
+
+    try:
+        intervals = librosa.effects.split(
+            audio,
+            top_db=30,
+        )
+    except Exception:
+        intervals = []
+
     if len(intervals):
-        y = np.concatenate([y[a:b] for a, b in intervals])
+        audio = np.concatenate(
+            [
+                audio[start:end]
+                for start, end in intervals
+            ]
+        )
 
-    if y.size < SAMPLE_RATE:
-        raise ValueError("Not enough speech after silence removal.")
+    if audio.size < SAMPLE_RATE:
+        raise ValueError(
+            "Not enough speech after silence removal."
+        )
 
     max_samples = SAMPLE_RATE * 20
-    if len(y) > max_samples:
-        start = (len(y) - max_samples) // 2
-        y = y[start:start + max_samples]
 
-    return np.ascontiguousarray(y, dtype=np.float32)
+    if len(audio) > max_samples:
+        start = (
+            len(audio) - max_samples
+        ) // 2
+
+        audio = audio[
+            start:start + max_samples
+        ]
+
+    return np.ascontiguousarray(
+        audio,
+        dtype=np.float32,
+    )
 
 
-def create_embedding(raw: bytes, filename: str) -> np.ndarray:
-    audio = decode_audio(raw, filename)
+def create_embedding(
+    raw: bytes,
+    filename: str,
+) -> np.ndarray:
+    """Create a normalized ECAPA speaker embedding."""
+
+    audio = decode_audio(
+        raw,
+        filename,
+    )
+
     model = _get_model()
-    waveform = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+
+    waveform = torch.tensor(
+        audio,
+        dtype=torch.float32,
+    ).unsqueeze(0)
 
     with torch.no_grad():
-        emb = model.encode_batch(waveform)
+        embedding = model.encode_batch(
+            waveform
+        )
 
-    emb = emb.detach().cpu().numpy().reshape(-1).astype(np.float32)
-    norm = np.linalg.norm(emb)
+    embedding = (
+        embedding
+        .detach()
+        .cpu()
+        .numpy()
+        .reshape(-1)
+        .astype(np.float32)
+    )
+
+    if embedding.size != EMBEDDING_DIM:
+        raise RuntimeError(
+            f"Unexpected speaker embedding dimension: "
+            f"{embedding.size}. "
+            f"Expected {EMBEDDING_DIM}."
+        )
+
+    norm = np.linalg.norm(embedding)
+
     if norm <= 0:
-        raise RuntimeError("Speaker embedding has zero norm.")
-    return (emb / norm).astype(np.float32)
+        raise RuntimeError(
+            "Speaker embedding has zero norm."
+        )
+
+    return (
+        embedding / norm
+    ).astype(np.float32)
 
 
 def _require_faiss() -> None:
     if faiss is None:
-        raise RuntimeError("FAISS is not installed. Run: pip install faiss-cpu")
+        raise RuntimeError(
+            "FAISS is not installed. "
+            "Run: pip install faiss-cpu"
+        )
 
 
 def _load_index():
+    """Load FAISS index or create an empty one."""
+
     _require_faiss()
+
     if INDEX_FILE.exists():
-        index = faiss.read_index(str(INDEX_FILE))
-        if index.d != EMBEDDING_DIM:
-            raise RuntimeError("Existing FAISS index has incompatible embedding dimension.")
-        return index
-    return faiss.IndexFlatIP(EMBEDDING_DIM)
+        try:
+            index = faiss.read_index(
+                str(INDEX_FILE)
+            )
+
+            if index.d != EMBEDDING_DIM:
+                raise RuntimeError(
+                    "Existing FAISS index has "
+                    "incompatible embedding dimension."
+                )
+
+            return index
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not load the speaker FAISS index. "
+                "Delete models/speaker_registry/"
+                "speakers.faiss and rebuild the registry."
+            ) from exc
+
+    return faiss.IndexFlatIP(
+        EMBEDDING_DIM
+    )
 
 
 def rebuild_index() -> int:
-    _require_faiss()
-    registry = load_registry()
-    speakers = list(registry.get("speakers", {}).values())
-    index = faiss.IndexFlatIP(EMBEDDING_DIM)
+    """Rebuild FAISS index from registered speakers."""
 
-    if speakers:
-        matrix = np.asarray([s["embedding"] for s in speakers], dtype=np.float32)
+    _require_faiss()
+
+    registry = load_registry()
+
+    speakers = list(
+        registry
+        .get("speakers", {})
+        .values()
+    )
+
+    index = faiss.IndexFlatIP(
+        EMBEDDING_DIM
+    )
+
+    valid_embeddings = []
+
+    for speaker in speakers:
+        embedding = speaker.get(
+            "embedding"
+        )
+
+        if not isinstance(
+            embedding,
+            list,
+        ):
+            continue
+
+        vector = np.asarray(
+            embedding,
+            dtype=np.float32,
+        ).reshape(-1)
+
+        if vector.size != EMBEDDING_DIM:
+            continue
+
+        norm = np.linalg.norm(vector)
+
+        if norm <= 0:
+            continue
+
+        vector = vector / norm
+
+        valid_embeddings.append(
+            vector
+        )
+
+    if valid_embeddings:
+        matrix = np.asarray(
+            valid_embeddings,
+            dtype=np.float32,
+        )
+
         faiss.normalize_L2(matrix)
+
         index.add(matrix)
 
-    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(INDEX_FILE))
+    REGISTRY_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    faiss.write_index(
+        index,
+        str(INDEX_FILE),
+    )
+
     return int(index.ntotal)
 
 
-def enroll_speaker(name: str, samples: list[tuple[bytes, str]]) -> dict[str, Any]:
-    _require_faiss()
-    name = name.strip()
-    if not name:
-        raise ValueError("Speaker name is required.")
-    if not samples:
-        raise ValueError("At least one voice sample is required.")
+def enroll_speaker(
+    name: str,
+    samples: list[tuple[bytes, str]],
+) -> dict[str, Any]:
+    """Create or replace a registered speaker profile."""
 
-    embeddings = []
-    hashes = []
+    _require_faiss()
+
+    name = name.strip()
+
+    if not name:
+        raise ValueError(
+            "Speaker name is required."
+        )
+
+    if not samples:
+        raise ValueError(
+            "At least one voice sample is required."
+        )
+
+    embeddings: list[np.ndarray] = []
+    hashes: list[str] = []
 
     for raw, filename in samples:
-        embeddings.append(create_embedding(raw, filename))
-        hashes.append(hashlib.sha256(raw).hexdigest()[:16])
+        embeddings.append(
+            create_embedding(
+                raw,
+                filename,
+            )
+        )
 
-    mean = np.mean(np.stack(embeddings), axis=0)
-    norm = np.linalg.norm(mean)
+        hashes.append(
+            hashlib.sha256(
+                raw
+            ).hexdigest()[:16]
+        )
+
+    mean_embedding = np.mean(
+        np.stack(embeddings),
+        axis=0,
+    )
+
+    norm = np.linalg.norm(
+        mean_embedding
+    )
+
     if norm <= 0:
-        raise RuntimeError("Could not construct a stable speaker profile.")
-    mean = (mean / norm).astype(np.float32)
+        raise RuntimeError(
+            "Could not construct a stable "
+            "speaker profile."
+        )
+
+    mean_embedding = (
+        mean_embedding / norm
+    ).astype(np.float32)
 
     registry = load_registry()
-    speakers = registry.setdefault("speakers", {})
-    speaker_id = hashlib.sha256(name.lower().encode("utf-8")).hexdigest()[:16]
+
+    speakers = registry.setdefault(
+        "speakers",
+        {},
+    )
+
+    speaker_id = hashlib.sha256(
+        name.lower().encode("utf-8")
+    ).hexdigest()[:16]
 
     speakers[speaker_id] = {
         "id": speaker_id,
         "name": name,
-        "embedding": mean.tolist(),
+        "embedding": mean_embedding.tolist(),
         "samples": len(samples),
         "sample_hashes": hashes,
     }
 
     save_registry(registry)
+
     rebuild_index()
 
     return {
         "speaker_id": speaker_id,
         "name": name,
         "samples": len(samples),
-        "embedding_dimension": int(mean.shape[0]),
+        "embedding_dimension": int(
+            mean_embedding.shape[0]
+        ),
         "index_size": len(speakers),
     }
 
 
-def match_speaker(raw: bytes, filename: str) -> dict[str, Any]:
+def match_speaker(
+    raw: bytes,
+    filename: str,
+) -> dict[str, Any]:
+    """Find closest registered speaker."""
+
     _require_faiss()
+
     registry = load_registry()
-    speakers = list(registry.get("speakers", {}).values())
+
+    speakers = list(
+        registry
+        .get("speakers", {})
+        .values()
+    )
 
     if not speakers:
         return {
@@ -224,70 +495,151 @@ def match_speaker(raw: bytes, filename: str) -> dict[str, Any]:
         }
 
     index = _load_index()
+
     if index.ntotal != len(speakers):
         rebuild_index()
         index = _load_index()
 
-    query = create_embedding(raw, filename).reshape(1, -1).astype(np.float32)
-    faiss.normalize_L2(query)
-
-    similarities, indices = index.search(query, min(3, index.ntotal))
-    best = float(similarities[0][0])
-    idx = int(indices[0][0])
-
-    if idx < 0:
+    if index.ntotal == 0:
         return {
             "available": False,
             "matched": False,
             "speaker": None,
             "similarity": 0.0,
-            "reason": "No vector match.",
+            "reason": (
+                "Speaker index contains "
+                "no valid embeddings."
+            ),
+        }
+
+    query = create_embedding(
+        raw,
+        filename,
+    )
+
+    query = query.reshape(
+        1,
+        -1,
+    ).astype(np.float32)
+
+    faiss.normalize_L2(query)
+
+    similarities, indices = index.search(
+        query,
+        min(3, index.ntotal),
+    )
+
+    best = float(
+        similarities[0][0]
+    )
+
+    idx = int(
+        indices[0][0]
+    )
+
+    if idx < 0 or idx >= len(speakers):
+        return {
+            "available": False,
+            "matched": False,
+            "speaker": None,
+            "similarity": 0.0,
+            "reason": "No valid vector match.",
         }
 
     speaker = speakers[idx]
 
     return {
         "available": True,
-        "matched": best >= MATCH_THRESHOLD,
+        "matched": (
+            best >= MATCH_THRESHOLD
+        ),
         "speaker": speaker["name"],
         "speaker_id": speaker["id"],
-        "similarity": round(float(np.clip(best, -1.0, 1.0)) * 100.0, 2),
-        "cosine_similarity": round(best, 5),
+        "similarity": round(
+            float(
+                np.clip(
+                    best,
+                    -1.0,
+                    1.0,
+                )
+            ) * 100.0,
+            2,
+        ),
+        "cosine_similarity": round(
+            best,
+            5,
+        ),
         "threshold": MATCH_THRESHOLD,
-        "method": "ECAPA-TDNN speaker embedding + FAISS inner-product search",
-        "registered_speakers": len(speakers),
+        "method": (
+            "ECAPA-TDNN speaker embedding + "
+            "FAISS inner-product search"
+        ),
+        "registered_speakers": len(
+            speakers
+        ),
         "top_matches": [
             {
-                "speaker": speakers[int(i)]["name"],
-                "similarity": round(float(score) * 100.0, 2),
+                "speaker": speakers[
+                    int(index)
+                ]["name"],
+                "similarity": round(
+                    float(score) * 100.0,
+                    2,
+                ),
             }
-            for score, i in zip(similarities[0], indices[0])
-            if int(i) >= 0
+            for score, index in zip(
+                similarities[0],
+                indices[0],
+            )
+            if 0 <= int(index) < len(speakers)
         ],
+        "interpretation": (
+            "Speaker similarity is a matching "
+            "signal only. It is not proof of "
+            "identity or voice authenticity."
+        ),
     }
 
 
-def list_registered_speakers() -> list[dict[str, Any]]:
+def list_registered_speakers() -> list[
+    dict[str, Any]
+]:
     registry = load_registry()
+
     return [
         {
-            "id": s["id"],
-            "name": s["name"],
-            "samples": s.get("samples", 0),
+            "id": speaker["id"],
+            "name": speaker["name"],
+            "samples": speaker.get(
+                "samples",
+                0,
+            ),
         }
-        for s in registry.get("speakers", {}).values()
+        for speaker in registry
+        .get("speakers", {})
+        .values()
     ]
 
 
-def delete_speaker(speaker_id: str) -> bool:
+def delete_speaker(
+    speaker_id: str,
+) -> bool:
     registry = load_registry()
-    speakers = registry.get("speakers", {})
+
+    speakers = registry.get(
+        "speakers",
+        {},
+    )
+
     if speaker_id not in speakers:
         return False
 
     del speakers[speaker_id]
+
     save_registry(registry)
+
     rebuild_index()
+
     return True
 
 
@@ -297,16 +649,47 @@ def compare_speaker_audio(
     target_raw: bytes,
     target_name: str,
 ) -> dict[str, Any]:
-    ref = create_embedding(reference_raw, reference_name)
-    target = create_embedding(target_raw, target_name)
-    cosine = float(np.clip(np.dot(ref, target), -1.0, 1.0))
+    """Compare two audio files using ECAPA embeddings."""
+
+    reference_embedding = create_embedding(
+        reference_raw,
+        reference_name,
+    )
+
+    target_embedding = create_embedding(
+        target_raw,
+        target_name,
+    )
+
+    cosine = float(
+        np.clip(
+            np.dot(
+                reference_embedding,
+                target_embedding,
+            ),
+            -1.0,
+            1.0,
+        )
+    )
 
     return {
         "available": True,
-        "score": round(cosine * 100.0, 2),
-        "cosine": round(cosine, 5),
+        "score": round(
+            cosine * 100.0,
+            2,
+        ),
+        "cosine": round(
+            cosine,
+            5,
+        ),
         "reference_file": reference_name,
         "target_file": target_name,
-        "method": "ECAPA-TDNN speaker embeddings + cosine similarity",
-        "interpretation": "Similarity signal only; not proof of speaker identity or authenticity.",
+        "method": (
+            "ECAPA-TDNN speaker embeddings + "
+            "cosine similarity"
+        ),
+        "interpretation": (
+            "Similarity signal only; not proof "
+            "of speaker identity or authenticity."
+        ),
     }
