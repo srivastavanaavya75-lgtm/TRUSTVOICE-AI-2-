@@ -15,23 +15,13 @@ try:
 except ImportError:
     faiss = None
 
-try:
-    import torch
-except ImportError:
-    torch = None
-
-try:
-    import librosa
-except ImportError:
-    librosa = None
-
-try:
-    from speechbrain.inference.speaker import EncoderClassifier
-except ImportError:
-    try:
-        from speechbrain.pretrained import EncoderClassifier
-    except ImportError:
-        EncoderClassifier = None
+# Heavy speaker-recognition dependencies are intentionally lazy.
+# The main TrustVoice app must still start if SpeechBrain/Flair/torch
+# is unavailable or incompatible with the deployed Python runtime.
+torch = None
+librosa = None
+EncoderClassifier = None
+_SPEAKER_IMPORT_ERROR = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -95,24 +85,54 @@ def save_registry(registry: dict[str, Any]) -> None:
     )
 
 
-def _require_models() -> None:
-    if EncoderClassifier is None:
+def _load_optional_speaker_dependencies() -> None:
+    """Load speaker-recognition dependencies only when speaker matching is used."""
+    global torch, librosa, EncoderClassifier, _SPEAKER_IMPORT_ERROR
+
+    if _SPEAKER_IMPORT_ERROR is not None:
         raise RuntimeError(
-            "SpeechBrain is not installed. "
-            "Run: pip install speechbrain"
+            "Speaker matching is unavailable in this deployment environment. "
+            f"Optional dependency error: {_SPEAKER_IMPORT_ERROR}"
         )
 
-    if torch is None:
-        raise RuntimeError("PyTorch is not installed.")
+    if EncoderClassifier is not None and torch is not None and librosa is not None:
+        return
 
-    if librosa is None:
-        raise RuntimeError("librosa is not installed.")
+    try:
+        import torch as _torch
+        import librosa as _librosa
+
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier as _EncoderClassifier
+        except Exception:
+            try:
+                from speechbrain.pretrained import EncoderClassifier as _EncoderClassifier
+            except Exception as exc:
+                raise RuntimeError(
+                    "SpeechBrain could not be loaded. "
+                    "Speaker matching is disabled, while the rest of TrustVoice remains available."
+                ) from exc
+
+        torch = _torch
+        librosa = _librosa
+        EncoderClassifier = _EncoderClassifier
+
+    except Exception as exc:
+        _SPEAKER_IMPORT_ERROR = str(exc)
+        raise RuntimeError(
+            "Speaker matching is unavailable. "
+            "The main TrustVoice analysis can continue without it."
+        ) from exc
+
+
+def _require_models() -> None:
+    _load_optional_speaker_dependencies()
 
 
 def _get_model():
     global _MODEL
 
-    _require_models()
+    _load_optional_speaker_dependencies()
 
     if _MODEL is None:
         _MODEL = EncoderClassifier.from_hparams(
@@ -438,9 +458,26 @@ def match_speaker(
     raw: bytes,
     filename: str,
 ) -> dict[str, Any]:
-    """Find closest registered speaker."""
+    """Find closest registered speaker.
 
-    _require_faiss()
+    Speaker recognition is optional. If its heavy ML stack is unavailable,
+    return a structured unavailable result instead of crashing TrustVoice.
+    """
+
+    try:
+        _require_faiss()
+        _load_optional_speaker_dependencies()
+    except Exception as exc:
+        return {
+            "available": False,
+            "matched": False,
+            "speaker": None,
+            "similarity": 0.0,
+            "reason": (
+                "Speaker matching unavailable in this deployment. "
+                f"Core voice/risk analysis can continue. Detail: {exc}"
+            ),
+        }
 
     registry = load_registry()
 
