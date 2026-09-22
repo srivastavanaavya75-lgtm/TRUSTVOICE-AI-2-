@@ -3,47 +3,88 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+
+# ============================================================
+# OPTIONAL FAISS
+# ============================================================
+
 try:
     import faiss
 except ImportError:
     faiss = None
 
-# Heavy speaker-recognition dependencies are intentionally lazy.
-# The main TrustVoice app must still start if SpeechBrain/Flair/torch
-# is unavailable or incompatible with the deployed Python runtime.
+
+# ============================================================
+# HEAVY SPEAKER DEPENDENCIES
+# ============================================================
+# IMPORTANT:
+# Do NOT import torch / librosa / speechbrain at module level.
+# Streamlit Cloud must be able to start even when the optional
+# speaker-recognition stack is unavailable.
+# ============================================================
+
 torch = None
 librosa = None
 EncoderClassifier = None
 _SPEAKER_IMPORT_ERROR = None
 
 
+# ============================================================
+# PATHS / CONSTANTS
+# ============================================================
+
 BASE_DIR = Path(__file__).resolve().parent
 
-REGISTRY_DIR = BASE_DIR / "models" / "speaker_registry"
-REGISTRY_FILE = REGISTRY_DIR / "registry.json"
-INDEX_FILE = REGISTRY_DIR / "speakers.faiss"
+REGISTRY_DIR = (
+    BASE_DIR
+    / "models"
+    / "speaker_registry"
+)
+
+REGISTRY_FILE = (
+    REGISTRY_DIR
+    / "registry.json"
+)
+
+INDEX_FILE = (
+    REGISTRY_DIR
+    / "speakers.faiss"
+)
 
 SAMPLE_RATE = 16000
+
 MATCH_THRESHOLD = 0.65
+
 EMBEDDING_DIM = 192
 
 _MODEL = None
 
 
+# ============================================================
+# REGISTRY
+# ============================================================
+
 def _ensure_registry() -> None:
-    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+    """Create speaker registry directory/file if missing."""
+
+    REGISTRY_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     if not REGISTRY_FILE.exists():
         REGISTRY_FILE.write_text(
             json.dumps(
-                {"version": 1, "speakers": {}},
+                {
+                    "version": 1,
+                    "speakers": {},
+                },
                 indent=2,
             ),
             encoding="utf-8",
@@ -51,20 +92,36 @@ def _ensure_registry() -> None:
 
 
 def load_registry() -> dict[str, Any]:
+    """Load registered speaker metadata."""
+
     _ensure_registry()
 
     try:
         data = json.loads(
-            REGISTRY_FILE.read_text(encoding="utf-8")
+            REGISTRY_FILE.read_text(
+                encoding="utf-8"
+            )
         )
 
         if not isinstance(data, dict):
-            raise ValueError("Registry root must be an object.")
+            raise ValueError(
+                "Registry root must be an object."
+            )
 
-        data.setdefault("version", 1)
-        data.setdefault("speakers", {})
+        data.setdefault(
+            "version",
+            1,
+        )
 
-        if not isinstance(data["speakers"], dict):
+        data.setdefault(
+            "speakers",
+            {},
+        )
+
+        if not isinstance(
+            data["speakers"],
+            dict,
+        ):
             data["speakers"] = {}
 
         return data
@@ -76,131 +133,352 @@ def load_registry() -> dict[str, Any]:
         }
 
 
-def save_registry(registry: dict[str, Any]) -> None:
+def save_registry(
+    registry: dict[str, Any],
+) -> None:
+    """Save speaker registry."""
+
     _ensure_registry()
 
     REGISTRY_FILE.write_text(
-        json.dumps(registry, indent=2),
+        json.dumps(
+            registry,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
 
+# ============================================================
+# LAZY SPEAKER DEPENDENCIES
+# ============================================================
+
 def _load_optional_speaker_dependencies() -> None:
-    """Load speaker-recognition dependencies only when speaker matching is used."""
-    global torch, librosa, EncoderClassifier, _SPEAKER_IMPORT_ERROR
+    """
+    Load heavy speaker-recognition dependencies only when needed.
+
+    The main TrustVoice application can therefore run without
+    SpeechBrain, Torch, Librosa, Flair or spaCy being available.
+    """
+
+    global torch
+    global librosa
+    global EncoderClassifier
+    global _SPEAKER_IMPORT_ERROR
 
     if _SPEAKER_IMPORT_ERROR is not None:
         raise RuntimeError(
-            "Speaker matching is unavailable in this deployment environment. "
-            f"Optional dependency error: {_SPEAKER_IMPORT_ERROR}"
+            "Speaker matching is unavailable in this "
+            "deployment environment. "
+            f"Optional dependency error: "
+            f"{_SPEAKER_IMPORT_ERROR}"
         )
 
-    if EncoderClassifier is not None and torch is not None and librosa is not None:
+    if (
+        EncoderClassifier is not None
+        and torch is not None
+        and librosa is not None
+    ):
         return
 
     try:
+
         import torch as _torch
+
         import librosa as _librosa
 
+        # ----------------------------------------------------
+        # SpeechBrain import
+        # ----------------------------------------------------
+
         try:
-            from speechbrain.inference.speaker import EncoderClassifier as _EncoderClassifier
+
+            from speechbrain.inference.speaker import (
+                EncoderClassifier as _EncoderClassifier
+            )
+
         except Exception:
+
             try:
-                from speechbrain.pretrained import EncoderClassifier as _EncoderClassifier
+
+                from speechbrain.pretrained import (
+                    EncoderClassifier as _EncoderClassifier
+                )
+
             except Exception as exc:
+
                 raise RuntimeError(
                     "SpeechBrain could not be loaded. "
-                    "Speaker matching is disabled, while the rest of TrustVoice remains available."
+                    "Speaker matching is disabled, "
+                    "while the rest of TrustVoice remains available."
                 ) from exc
 
+        # ----------------------------------------------------
+        # Store successfully imported modules
+        # ----------------------------------------------------
+
         torch = _torch
+
         librosa = _librosa
+
         EncoderClassifier = _EncoderClassifier
 
     except Exception as exc:
+
         _SPEAKER_IMPORT_ERROR = str(exc)
+
         raise RuntimeError(
             "Speaker matching is unavailable. "
-            "The main TrustVoice analysis can continue without it."
+            "The main TrustVoice analysis can continue "
+            "without it."
         ) from exc
 
 
 def _require_models() -> None:
+    """Ensure optional speaker dependencies are available."""
+
     _load_optional_speaker_dependencies()
 
 
+# ============================================================
+# ECAPA SPEAKER MODEL
+# ============================================================
+
 def _get_model():
+    """Load ECAPA speaker model lazily."""
+
     global _MODEL
 
     _load_optional_speaker_dependencies()
 
     if _MODEL is None:
+
+        model_directory = (
+            BASE_DIR
+            / "models"
+            / "ecapa_voxceleb"
+        )
+
         _MODEL = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
-            savedir=str(
-                BASE_DIR / "models" / "ecapa_voxceleb"
+            source=(
+                "speechbrain/"
+                "spkrec-ecapa-voxceleb"
             ),
-            run_opts={"device": "cpu"},
+            savedir=str(
+                model_directory
+            ),
+            run_opts={
+                "device": "cpu"
+            },
         )
 
     return _MODEL
 
 
+# ============================================================
+# AUDIO DECODING
+# ============================================================
+
 def decode_audio(
     raw: bytes,
     filename: str,
 ) -> np.ndarray:
-    """Decode common audio/video containers to mono 16 kHz float32 speech."""
-    _require_models()
-    if not raw:
-        raise ValueError("Empty audio input.")
+    """
+    Decode common audio/video containers into:
 
-    suffix = Path(filename).suffix.lower() or ".bin"
+    mono
+    16 kHz
+    float32
+    speech-focused audio
+    """
+
+    _require_models()
+
+    if not raw:
+        raise ValueError(
+            "Empty audio input."
+        )
+
+    suffix = (
+        Path(filename).suffix.lower()
+        or ".bin"
+    )
+
     tmpdir = None
+
     try:
+
         import imageio_ffmpeg
         import subprocess
         import tempfile
+
         tmpdir = tempfile.TemporaryDirectory()
-        work = Path(tmpdir.name)
-        source = work / f"input{suffix}"
-        wav = work / "speaker_16k.wav"
-        source.write_bytes(raw)
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        proc = subprocess.run(
-            [ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source),
-             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(wav)],
-            capture_output=True, text=True, timeout=180,
+
+        work = Path(
+            tmpdir.name
         )
-        if proc.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
-            detail = proc.stderr.strip()[-700:] or "Unsupported or corrupt audio."
-            raise ValueError(f"Could not decode audio: {detail}")
-        audio, _ = librosa.load(str(wav), sr=SAMPLE_RATE, mono=True)
+
+        source = (
+            work
+            / f"input{suffix}"
+        )
+
+        wav = (
+            work
+            / "speaker_16k.wav"
+        )
+
+        source.write_bytes(raw)
+
+        ffmpeg_exe = (
+            imageio_ffmpeg
+            .get_ffmpeg_exe()
+        )
+
+        proc = subprocess.run(
+            [
+                ffmpeg_exe,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                str(wav),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        if (
+            proc.returncode != 0
+            or not wav.exists()
+            or wav.stat().st_size == 0
+        ):
+
+            detail = (
+                proc.stderr.strip()[-700:]
+                or "Unsupported or corrupt audio."
+            )
+
+            raise ValueError(
+                f"Could not decode audio: {detail}"
+            )
+
+        audio, _ = librosa.load(
+            str(wav),
+            sr=SAMPLE_RATE,
+            mono=True,
+        )
+
     except ValueError:
+
         raise
+
     except Exception as exc:
-        raise ValueError("Could not decode the audio. Please upload a valid speech recording.") from exc
+
+        raise ValueError(
+            "Could not decode the audio. "
+            "Please upload a valid speech recording."
+        ) from exc
+
     finally:
+
         if tmpdir is not None:
             tmpdir.cleanup()
 
-    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32))
-    if audio.size < SAMPLE_RATE:
-        raise ValueError("Audio must contain at least one second of speech.")
-    try:
-        intervals = librosa.effects.split(audio, top_db=30)
-    except Exception:
-        intervals = []
-    if len(intervals):
-        audio = np.concatenate([audio[start:end] for start, end in intervals])
-    if audio.size < SAMPLE_RATE:
-        raise ValueError("Not enough speech after silence removal.")
-    max_samples = SAMPLE_RATE * 30
-    if len(audio) > max_samples:
-        start = (len(audio) - max_samples) // 2
-        audio = audio[start:start + max_samples]
-    return np.ascontiguousarray(audio, dtype=np.float32)
+    # --------------------------------------------------------
+    # Clean numerical issues
+    # --------------------------------------------------------
 
+    audio = np.nan_to_num(
+        np.asarray(
+            audio,
+            dtype=np.float32,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Minimum duration
+    # --------------------------------------------------------
+
+    if audio.size < SAMPLE_RATE:
+
+        raise ValueError(
+            "Audio must contain at least "
+            "one second of speech."
+        )
+
+    # --------------------------------------------------------
+    # Remove long silence regions
+    # --------------------------------------------------------
+
+    try:
+
+        intervals = (
+            librosa.effects.split(
+                audio,
+                top_db=30,
+            )
+        )
+
+    except Exception:
+
+        intervals = []
+
+    if len(intervals):
+
+        audio = np.concatenate(
+            [
+                audio[start:end]
+                for start, end in intervals
+            ]
+        )
+
+    if audio.size < SAMPLE_RATE:
+
+        raise ValueError(
+            "Not enough speech after "
+            "silence removal."
+        )
+
+    # --------------------------------------------------------
+    # Limit processing duration
+    # --------------------------------------------------------
+
+    max_samples = (
+        SAMPLE_RATE * 30
+    )
+
+    if len(audio) > max_samples:
+
+        start = (
+            len(audio)
+            - max_samples
+        ) // 2
+
+        audio = audio[
+            start:
+            start + max_samples
+        ]
+
+    return np.ascontiguousarray(
+        audio,
+        dtype=np.float32,
+    )
+
+
+# ============================================================
+# CREATE SPEAKER EMBEDDING
+# ============================================================
 
 def create_embedding(
     raw: bytes,
@@ -221,8 +499,11 @@ def create_embedding(
     ).unsqueeze(0)
 
     with torch.no_grad():
-        embedding = model.encode_batch(
-            waveform
+
+        embedding = (
+            model.encode_batch(
+                waveform
+            )
         )
 
     embedding = (
@@ -235,15 +516,19 @@ def create_embedding(
     )
 
     if embedding.size != EMBEDDING_DIM:
+
         raise RuntimeError(
-            f"Unexpected speaker embedding dimension: "
+            "Unexpected speaker embedding dimension: "
             f"{embedding.size}. "
             f"Expected {EMBEDDING_DIM}."
         )
 
-    norm = np.linalg.norm(embedding)
+    norm = np.linalg.norm(
+        embedding
+    )
 
     if norm <= 0:
+
         raise RuntimeError(
             "Speaker embedding has zero norm."
         )
@@ -253,8 +538,15 @@ def create_embedding(
     ).astype(np.float32)
 
 
+# ============================================================
+# FAISS
+# ============================================================
+
 def _require_faiss() -> None:
+    """Check whether FAISS is available."""
+
     if faiss is None:
+
         raise RuntimeError(
             "FAISS is not installed. "
             "Run: pip install faiss-cpu"
@@ -262,17 +554,20 @@ def _require_faiss() -> None:
 
 
 def _load_index():
-    """Load FAISS index or create an empty one."""
+    """Load existing FAISS index or create an empty one."""
 
     _require_faiss()
 
     if INDEX_FILE.exists():
+
         try:
+
             index = faiss.read_index(
                 str(INDEX_FILE)
             )
 
             if index.d != EMBEDDING_DIM:
+
                 raise RuntimeError(
                     "Existing FAISS index has "
                     "incompatible embedding dimension."
@@ -281,16 +576,22 @@ def _load_index():
             return index
 
         except Exception as exc:
+
             raise RuntimeError(
                 "Could not load the speaker FAISS index. "
-                "Delete models/speaker_registry/"
-                "speakers.faiss and rebuild the registry."
+                "Delete "
+                "models/speaker_registry/speakers.faiss "
+                "and rebuild the registry."
             ) from exc
 
     return faiss.IndexFlatIP(
         EMBEDDING_DIM
     )
 
+
+# ============================================================
+# REBUILD INDEX
+# ============================================================
 
 def rebuild_index() -> int:
     """Rebuild FAISS index from registered speakers."""
@@ -301,7 +602,10 @@ def rebuild_index() -> int:
 
     speakers = list(
         registry
-        .get("speakers", {})
+        .get(
+            "speakers",
+            {},
+        )
         .values()
     )
 
@@ -312,6 +616,7 @@ def rebuild_index() -> int:
     valid_embeddings = []
 
     for speaker in speakers:
+
         embedding = speaker.get(
             "embedding"
         )
@@ -330,26 +635,35 @@ def rebuild_index() -> int:
         if vector.size != EMBEDDING_DIM:
             continue
 
-        norm = np.linalg.norm(vector)
+        norm = np.linalg.norm(
+            vector
+        )
 
         if norm <= 0:
             continue
 
-        vector = vector / norm
+        vector = (
+            vector / norm
+        )
 
         valid_embeddings.append(
             vector
         )
 
     if valid_embeddings:
+
         matrix = np.asarray(
             valid_embeddings,
             dtype=np.float32,
         )
 
-        faiss.normalize_L2(matrix)
+        faiss.normalize_L2(
+            matrix
+        )
 
-        index.add(matrix)
+        index.add(
+            matrix
+        )
 
     REGISTRY_DIR.mkdir(
         parents=True,
@@ -361,33 +675,55 @@ def rebuild_index() -> int:
         str(INDEX_FILE),
     )
 
-    return int(index.ntotal)
+    return int(
+        index.ntotal
+    )
 
+
+# ============================================================
+# ENROLL SPEAKER
+# ============================================================
 
 def enroll_speaker(
     name: str,
     samples: list[tuple[bytes, str]],
 ) -> dict[str, Any]:
-    """Create or replace a registered speaker profile."""
+    """
+    Create or replace a registered speaker profile.
+
+    samples:
+        [
+            (audio_bytes, filename),
+            ...
+        ]
+    """
 
     _require_faiss()
 
     name = name.strip()
 
     if not name:
+
         raise ValueError(
             "Speaker name is required."
         )
 
     if not samples:
+
         raise ValueError(
             "At least one voice sample is required."
         )
 
     embeddings: list[np.ndarray] = []
+
     hashes: list[str] = []
 
+    # --------------------------------------------------------
+    # Generate embeddings
+    # --------------------------------------------------------
+
     for raw, filename in samples:
+
         embeddings.append(
             create_embedding(
                 raw,
@@ -401,8 +737,14 @@ def enroll_speaker(
             ).hexdigest()[:16]
         )
 
+    # --------------------------------------------------------
+    # Average embeddings
+    # --------------------------------------------------------
+
     mean_embedding = np.mean(
-        np.stack(embeddings),
+        np.stack(
+            embeddings
+        ),
         axis=0,
     )
 
@@ -411,6 +753,7 @@ def enroll_speaker(
     )
 
     if norm <= 0:
+
         raise RuntimeError(
             "Could not construct a stable "
             "speaker profile."
@@ -420,6 +763,10 @@ def enroll_speaker(
         mean_embedding / norm
     ).astype(np.float32)
 
+    # --------------------------------------------------------
+    # Registry
+    # --------------------------------------------------------
+
     registry = load_registry()
 
     speakers = registry.setdefault(
@@ -428,107 +775,257 @@ def enroll_speaker(
     )
 
     speaker_id = hashlib.sha256(
-        name.lower().encode("utf-8")
+        name.lower().encode(
+            "utf-8"
+        )
     ).hexdigest()[:16]
 
     speakers[speaker_id] = {
+
         "id": speaker_id,
+
         "name": name,
-        "embedding": mean_embedding.tolist(),
+
+        "embedding": (
+            mean_embedding.tolist()
+        ),
+
         "samples": len(samples),
+
         "sample_hashes": hashes,
     }
 
-    save_registry(registry)
+    save_registry(
+        registry
+    )
 
     rebuild_index()
 
     return {
+
         "speaker_id": speaker_id,
+
         "name": name,
+
         "samples": len(samples),
+
         "embedding_dimension": int(
             mean_embedding.shape[0]
         ),
-        "index_size": len(speakers),
+
+        "index_size": len(
+            speakers
+        ),
     }
 
+
+# ============================================================
+# MATCH SPEAKER
+# ============================================================
 
 def match_speaker(
     raw: bytes,
     filename: str,
 ) -> dict[str, Any]:
-    """Find closest registered speaker.
+    """
+    Find the closest registered speaker.
 
-    Speaker recognition is optional. If its heavy ML stack is unavailable,
-    return a structured unavailable result instead of crashing TrustVoice.
+    Speaker recognition is optional.
+
+    If SpeechBrain / Torch / Librosa / FAISS
+    is unavailable, TrustVoice returns a structured
+    unavailable response instead of crashing.
     """
 
+    # --------------------------------------------------------
+    # Optional dependency check
+    # --------------------------------------------------------
+
     try:
+
         _require_faiss()
+
         _load_optional_speaker_dependencies()
+
     except Exception as exc:
+
         return {
+
             "available": False,
+
             "matched": False,
+
             "speaker": None,
+
             "similarity": 0.0,
+
             "reason": (
-                "Speaker matching unavailable in this deployment. "
-                f"Core voice/risk analysis can continue. Detail: {exc}"
+                "Speaker matching unavailable "
+                "in this deployment. "
+                "Core voice/risk analysis can continue. "
+                f"Detail: {exc}"
             ),
         }
+
+    # --------------------------------------------------------
+    # Load registry
+    # --------------------------------------------------------
 
     registry = load_registry()
 
     speakers = list(
         registry
-        .get("speakers", {})
+        .get(
+            "speakers",
+            {},
+        )
         .values()
     )
 
     if not speakers:
+
         return {
+
             "available": False,
+
             "matched": False,
+
             "speaker": None,
+
             "similarity": 0.0,
-            "reason": "No registered speakers.",
+
+            "reason": (
+                "No registered speakers."
+            ),
         }
 
-    index = _load_index()
+    # --------------------------------------------------------
+    # Load FAISS index
+    # --------------------------------------------------------
 
-    if index.ntotal != len(speakers):
-        rebuild_index()
+    try:
+
         index = _load_index()
 
-    if index.ntotal == 0:
+    except Exception as exc:
+
         return {
+
             "available": False,
+
             "matched": False,
+
             "speaker": None,
+
             "similarity": 0.0,
+
+            "reason": (
+                "Speaker index could not be loaded. "
+                f"Detail: {exc}"
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Rebuild if registry and index differ
+    # --------------------------------------------------------
+
+    if index.ntotal != len(
+        speakers
+    ):
+
+        try:
+
+            rebuild_index()
+
+            index = _load_index()
+
+        except Exception as exc:
+
+            return {
+
+                "available": False,
+
+                "matched": False,
+
+                "speaker": None,
+
+                "similarity": 0.0,
+
+                "reason": (
+                    "Speaker index rebuild failed. "
+                    f"Detail: {exc}"
+                ),
+            }
+
+    if index.ntotal == 0:
+
+        return {
+
+            "available": False,
+
+            "matched": False,
+
+            "speaker": None,
+
+            "similarity": 0.0,
+
             "reason": (
                 "Speaker index contains "
                 "no valid embeddings."
             ),
         }
 
-    query = create_embedding(
-        raw,
-        filename,
+    # --------------------------------------------------------
+    # Generate query embedding
+    # --------------------------------------------------------
+
+    try:
+
+        query = create_embedding(
+            raw,
+            filename,
+        )
+
+    except Exception as exc:
+
+        return {
+
+            "available": False,
+
+            "matched": False,
+
+            "speaker": None,
+
+            "similarity": 0.0,
+
+            "reason": (
+                "Could not create speaker embedding. "
+                f"Detail: {exc}"
+            ),
+        }
+
+    query = (
+        query
+        .reshape(1, -1)
+        .astype(np.float32)
     )
 
-    query = query.reshape(
-        1,
-        -1,
-    ).astype(np.float32)
+    faiss.normalize_L2(
+        query
+    )
 
-    faiss.normalize_L2(query)
+    # --------------------------------------------------------
+    # Search
+    # --------------------------------------------------------
 
-    similarities, indices = index.search(
-        query,
-        min(3, index.ntotal),
+    similarities, indices = (
+        index.search(
+            query,
+            min(
+                3,
+                index.ntotal,
+            ),
+        )
     )
 
     best = float(
@@ -539,24 +1036,83 @@ def match_speaker(
         indices[0][0]
     )
 
-    if idx < 0 or idx >= len(speakers):
+    if (
+        idx < 0
+        or idx >= len(speakers)
+    ):
+
         return {
+
             "available": False,
+
             "matched": False,
+
             "speaker": None,
+
             "similarity": 0.0,
-            "reason": "No valid vector match.",
+
+            "reason": (
+                "No valid vector match."
+            ),
         }
 
     speaker = speakers[idx]
 
+    # --------------------------------------------------------
+    # Top matches
+    # --------------------------------------------------------
+
+    top_matches = []
+
+    for score, index_value in zip(
+        similarities[0],
+        indices[0],
+    ):
+
+        index_value = int(
+            index_value
+        )
+
+        if (
+            0 <= index_value
+            < len(speakers)
+        ):
+
+            top_matches.append(
+                {
+                    "speaker": speakers[
+                        index_value
+                    ]["name"],
+
+                    "similarity": round(
+                        float(score)
+                        * 100.0,
+                        2,
+                    ),
+                }
+            )
+
+    # --------------------------------------------------------
+    # Result
+    # --------------------------------------------------------
+
     return {
+
         "available": True,
+
         "matched": (
-            best >= MATCH_THRESHOLD
+            best
+            >= MATCH_THRESHOLD
         ),
-        "speaker": speaker["name"],
-        "speaker_id": speaker["id"],
+
+        "speaker": speaker[
+            "name"
+        ],
+
+        "speaker_id": speaker[
+            "id"
+        ],
+
         "similarity": round(
             float(
                 np.clip(
@@ -564,68 +1120,85 @@ def match_speaker(
                     -1.0,
                     1.0,
                 )
-            ) * 100.0,
+            )
+            * 100.0,
             2,
         ),
+
         "cosine_similarity": round(
             best,
             5,
         ),
+
         "threshold": MATCH_THRESHOLD,
+
         "method": (
-            "ECAPA-TDNN speaker embedding + "
-            "FAISS inner-product search"
+            "ECAPA-TDNN speaker embedding "
+            "+ FAISS inner-product search"
         ),
+
         "registered_speakers": len(
             speakers
         ),
-        "top_matches": [
-            {
-                "speaker": speakers[
-                    int(index)
-                ]["name"],
-                "similarity": round(
-                    float(score) * 100.0,
-                    2,
-                ),
-            }
-            for score, index in zip(
-                similarities[0],
-                indices[0],
-            )
-            if 0 <= int(index) < len(speakers)
-        ],
+
+        "top_matches": top_matches,
+
         "interpretation": (
-            "Speaker similarity is a matching "
-            "signal only. It is not proof of "
-            "identity or voice authenticity."
+            "Speaker similarity is a "
+            "matching signal only. "
+            "It is not proof of identity "
+            "or voice authenticity."
         ),
     }
 
 
+# ============================================================
+# LIST REGISTERED SPEAKERS
+# ============================================================
+
 def list_registered_speakers() -> list[
     dict[str, Any]
 ]:
+    """Return registered speaker metadata."""
+
     registry = load_registry()
 
     return [
+
         {
-            "id": speaker["id"],
-            "name": speaker["name"],
+
+            "id": speaker[
+                "id"
+            ],
+
+            "name": speaker[
+                "name"
+            ],
+
             "samples": speaker.get(
                 "samples",
                 0,
             ),
         }
+
         for speaker in registry
-        .get("speakers", {})
+        .get(
+            "speakers",
+            {},
+        )
         .values()
     ]
 
 
+# ============================================================
+# DELETE SPEAKER
+# ============================================================
+
 def delete_speaker(
     speaker_id: str,
 ) -> bool:
+    """Delete a registered speaker."""
+
     registry = load_registry()
 
     speakers = registry.get(
@@ -634,16 +1207,25 @@ def delete_speaker(
     )
 
     if speaker_id not in speakers:
+
         return False
 
-    del speakers[speaker_id]
+    del speakers[
+        speaker_id
+    ]
 
-    save_registry(registry)
+    save_registry(
+        registry
+    )
 
     rebuild_index()
 
     return True
 
+
+# ============================================================
+# DIRECT AUDIO COMPARISON
+# ============================================================
 
 def compare_speaker_audio(
     reference_raw: bytes,
@@ -651,16 +1233,22 @@ def compare_speaker_audio(
     target_raw: bytes,
     target_name: str,
 ) -> dict[str, Any]:
-    """Compare two audio files using ECAPA embeddings."""
+    """
+    Compare two audio files using ECAPA embeddings.
+    """
 
-    reference_embedding = create_embedding(
-        reference_raw,
-        reference_name,
+    reference_embedding = (
+        create_embedding(
+            reference_raw,
+            reference_name,
+        )
     )
 
-    target_embedding = create_embedding(
-        target_raw,
-        target_name,
+    target_embedding = (
+        create_embedding(
+            target_raw,
+            target_name,
+        )
     )
 
     cosine = float(
@@ -675,23 +1263,35 @@ def compare_speaker_audio(
     )
 
     return {
+
         "available": True,
+
         "score": round(
             cosine * 100.0,
             2,
         ),
+
         "cosine": round(
             cosine,
             5,
         ),
-        "reference_file": reference_name,
-        "target_file": target_name,
-        "method": (
-            "ECAPA-TDNN speaker embeddings + "
-            "cosine similarity"
+
+        "reference_file": (
+            reference_name
         ),
+
+        "target_file": (
+            target_name
+        ),
+
+        "method": (
+            "ECAPA-TDNN speaker embeddings "
+            "+ cosine similarity"
+        ),
+
         "interpretation": (
-            "Similarity signal only; not proof "
-            "of speaker identity or authenticity."
+            "Similarity signal only; "
+            "not proof of speaker identity "
+            "or authenticity."
         ),
     }
