@@ -1478,6 +1478,8 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
             beam_size=5,
             vad_filter=True,
             condition_on_previous_text=True,
+            language=None,
+            task="transcribe",
         )
         rows = []
         parts = []
@@ -1499,7 +1501,7 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
             "segments": rows,
             "language": getattr(info, "language", None),
             "language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 4),
-            "model": "faster-whisper base / CPU int8",
+            "model": "faster-whisper base multilingual / CPU int8",
         }
     finally:
         tmpdir.cleanup()
@@ -1549,6 +1551,21 @@ def _apply_transcript_analysis(transcript: str):
     st.session_state.risk_explanation = list(dict.fromkeys(st.session_state.risk_explanation))
     st.session_state.analysis_done = True
     return analysis
+
+
+def voice_authenticity_label(anti: dict | None) -> tuple[str, str]:
+    """Return a user-facing real-vs-AI label from the anti-spoof verdict.
+
+    Never invent a verdict when the quality gate/model is inconclusive.
+    """
+    if not anti:
+        return "UNAVAILABLE", "No anti-spoof model result."
+    verdict = str(anti.get("verdict", ""))
+    if verdict == "LIKELY SYNTHETIC / SPOOF":
+        return "LIKELY AI-GENERATED", "Countermeasure evidence indicates synthetic/spoofed speech."
+    if verdict == "LIKELY AUTHENTIC":
+        return "LIKELY REAL / AUTHENTIC", "Countermeasure evidence is consistent with bona-fide speech."
+    return "INCONCLUSIVE", verdict.replace("INCONCLUSIVE / ", "") or "Insufficient evidence for a reliable real-vs-AI decision."
 
 
 def analyze_audio_end_to_end(raw: bytes, filename: str, source_label: str = "Audio"):
@@ -2933,11 +2950,20 @@ elif nav == "Audio & Transcript Analysis":
         )
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("Language", st.session_state.get("transcript_language") or "—")
+            st.metric("Language", st.session_state.get("transcript_language") or "Auto-detected")
         with c2:
             st.metric("Segments", len(st.session_state.get("transcript_segments") or []))
         with c3:
-            st.metric("ASR", "Whisper")
+            st.metric("ASR", "Whisper Multilingual")
+
+        anti_result = (st.session_state.get("last_analysis") or {}).get("anti_spoof") or {}
+        voice_label, voice_detail = voice_authenticity_label(anti_result)
+        if voice_label == "LIKELY AI-GENERATED":
+            st.error(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
+        elif voice_label == "LIKELY REAL / AUTHENTIC":
+            st.success(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
+        else:
+            st.warning(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
 
         segments = st.session_state.get("transcript_segments") or []
         if segments:
