@@ -126,6 +126,19 @@ UNUSUAL_CHANNEL_PATTERNS = [
     "send it on whatsapp",
 ]
 
+HINDI_OTP_PATTERNS = [
+    "ओटीपी", "ओटीपी बताइए", "ओटीपी बताओ", "otp बताइए", "otp बताओ",
+    "कोड बताइए", "कोड बताओ", "otp batao", "otp bataiye", "verification code batao",
+]
+HINDI_UPI_PATTERNS = ["यूपीआई पिन", "upi ka pin", "upi का pin"]
+HINDI_PASSWORD_PATTERNS = ["पासवर्ड बताइए", "पासवर्ड बताओ", "password batao", "password bataiye"]
+HINDI_FINANCIAL_PATTERNS = ["पैसे भेजो", "पैसे भेजिए", "पैसा ट्रांसफर", "रुपये भेजो", "paise bhejo", "paise bhejiye", "money transfer karo"]
+HINDI_PERSONAL_PATTERNS = ["खाता नंबर", "अकाउंट नंबर", "मोबाइल नंबर", "फोन नंबर", "जन्म तारीख", "जन्मतिथि", "पता बताइए", "पता बताओ", "account number batao", "phone number batao"]
+HINDI_URGENCY_PATTERNS = ["अभी", "तुरंत", "जल्दी", "अभी के अभी", "फौरन", "abhi", "turant", "jaldi", "abhi ke abhi", "foran"]
+HINDI_THREAT_PATTERNS = ["खाता बंद", "अकाउंट बंद", "अकाउंट ब्लॉक", "खाता ब्लॉक", "पुलिस में शिकायत", "कानूनी कार्रवाई", "केस हो जाएगा", "account block ho jayega", "account band ho jayega", "police complaint", "legal action hoga"]
+HINDI_SECRECY_PATTERNS = ["किसी को मत बताना", "किसी को नहीं बताना", "गुप्त रखना", "kisi ko mat batana", "kisi ko nahi batana", "secret rakhna"]
+HINDI_AUTHORITY_PATTERNS = ["बैंक से बोल रहा", "बैंक से बोल रही", "बैंक अधिकारी", "सुरक्षा विभाग", "पुलिस अधिकारी", "सरकारी अधिकारी", "साइबर क्राइम", "कस्टमर केयर", "bank se bol raha", "bank se bol rahi", "bank officer", "security department", "police officer", "government officer", "cyber crime", "customer care"]
+
 AUTHORITY_PATTERNS = [
     "bank",
     "police",
@@ -235,7 +248,7 @@ class RiskEngine:
         # OTP / CREDENTIAL REQUEST
         # ====================================================
 
-        if matches(text, OTP_PATTERNS):
+        if matches(text, OTP_PATTERNS) or matches(text, HINDI_OTP_PATTERNS):
 
             requests.append("OTP")
 
@@ -249,7 +262,7 @@ class RiskEngine:
         # UPI PIN
         # ====================================================
 
-        if matches(text, UPI_PIN_PATTERNS):
+        if matches(text, UPI_PIN_PATTERNS) or matches(text, HINDI_UPI_PATTERNS):
 
             requests.append("UPI PIN")
 
@@ -263,7 +276,7 @@ class RiskEngine:
         # PASSWORD
         # ====================================================
 
-        if matches(text, ["password", "login password"]):
+        if matches(text, ["password", "login password"]) or matches(text, HINDI_PASSWORD_PATTERNS):
 
             requests.append("PASSWORD")
 
@@ -277,7 +290,7 @@ class RiskEngine:
         # FINANCIAL REQUEST
         # ====================================================
 
-        if matches(text, FINANCIAL_PATTERNS):
+        if matches(text, FINANCIAL_PATTERNS) or matches(text, HINDI_FINANCIAL_PATTERNS):
 
             requests.append("FINANCIAL")
 
@@ -305,7 +318,7 @@ class RiskEngine:
         # PERSONAL INFORMATION
         # ====================================================
 
-        if matches(text, PERSONAL_INFO_PATTERNS):
+        if matches(text, PERSONAL_INFO_PATTERNS) or matches(text, HINDI_PERSONAL_PATTERNS):
 
             requests.append("PERSONAL INFORMATION")
 
@@ -372,7 +385,7 @@ class RiskEngine:
         # URGENCY
         # ====================================================
 
-        if matches(text, URGENCY_PATTERNS):
+        if matches(text, URGENCY_PATTERNS) or matches(text, HINDI_URGENCY_PATTERNS):
 
             risk += 18
 
@@ -388,7 +401,7 @@ class RiskEngine:
         # THREAT
         # ====================================================
 
-        if matches(text, THREAT_PATTERNS):
+        if matches(text, THREAT_PATTERNS) or matches(text, HINDI_THREAT_PATTERNS):
 
             risk += 20
 
@@ -404,7 +417,7 @@ class RiskEngine:
         # SECRECY
         # ====================================================
 
-        if matches(text, SECRECY_PATTERNS):
+        if matches(text, SECRECY_PATTERNS) or matches(text, HINDI_SECRECY_PATTERNS):
 
             risk += 24
 
@@ -437,7 +450,7 @@ class RiskEngine:
         # ====================================================
 
         if (
-            matches(text, AUTHORITY_PATTERNS)
+            matches(text, AUTHORITY_PATTERNS) or matches(text, HINDI_AUTHORITY_PATTERNS)
             and identity == "UNVERIFIED"
         ):
 
@@ -476,7 +489,7 @@ class RiskEngine:
             identity == "VERIFIED"
             and (
                 requests
-                or matches(text, SECRECY_PATTERNS)
+                or matches(text, SECRECY_PATTERNS) or matches(text, HINDI_SECRECY_PATTERNS)
                 or matches(text, UNUSUAL_CHANNEL_PATTERNS)
             )
         ):

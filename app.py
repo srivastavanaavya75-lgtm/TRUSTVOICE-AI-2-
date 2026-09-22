@@ -1420,6 +1420,7 @@ def apply_antispoof_to_trust(result: dict, source_label: str):
 # ============================================================
 
 _WHISPER_MODEL = None
+WHISPER_MODEL_NAME = os.getenv("TRUSTVOICE_WHISPER_MODEL", "small")
 
 
 def _get_whisper_model():
@@ -1427,7 +1428,19 @@ def _get_whisper_model():
     if WhisperModel is None:
         raise RuntimeError("faster-whisper is not installed. Run: pip install faster-whisper")
     if _WHISPER_MODEL is None:
-        _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+        try:
+            _WHISPER_MODEL = WhisperModel(
+                WHISPER_MODEL_NAME,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=max(2, min(8, os.cpu_count() or 4)),
+                num_workers=1,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load faster-whisper model '{WHISPER_MODEL_NAME}'. "
+                "Check model availability and available RAM."
+            ) from exc
     return _WHISPER_MODEL
 
 
@@ -1476,8 +1489,15 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
         segments, info = model.transcribe(
             str(wav_path),
             beam_size=5,
+            best_of=5,
+            patience=1.0,
+            temperature=0.0,
             vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=350, speech_pad_ms=250),
             condition_on_previous_text=True,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.5,
             language=None,
             task="transcribe",
         )
@@ -1501,7 +1521,7 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
             "segments": rows,
             "language": getattr(info, "language", None),
             "language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 4),
-            "model": "faster-whisper base multilingual / CPU int8",
+            "model": f"faster-whisper {WHISPER_MODEL_NAME} / CPU int8 · Hindi + English + Hinglish",
         }
     finally:
         tmpdir.cleanup()

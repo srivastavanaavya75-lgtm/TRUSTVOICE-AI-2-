@@ -130,91 +130,56 @@ def decode_audio(
     raw: bytes,
     filename: str,
 ) -> np.ndarray:
-    """Decode audio and return mono 16 kHz float32 samples."""
-
+    """Decode common audio/video containers to mono 16 kHz float32 speech."""
     _require_models()
-
     if not raw:
         raise ValueError("Empty audio input.")
 
-    suffix = Path(filename).suffix.lower()
-
-    allowed = {
-        ".wav",
-        ".mp3",
-        ".m4a",
-        ".flac",
-        ".ogg",
-        ".webm",
-        ".aac",
-    }
-
-    if suffix not in allowed:
-        raise ValueError(
-            "Supported speaker audio: "
-            "WAV, MP3, M4A, FLAC, OGG, WEBM, AAC."
-        )
-
+    suffix = Path(filename).suffix.lower() or ".bin"
+    tmpdir = None
     try:
-        audio, _ = librosa.load(
-            io.BytesIO(raw),
-            sr=SAMPLE_RATE,
-            mono=True,
+        import imageio_ffmpeg
+        import subprocess
+        import tempfile
+        tmpdir = tempfile.TemporaryDirectory()
+        work = Path(tmpdir.name)
+        source = work / f"input{suffix}"
+        wav = work / "speaker_16k.wav"
+        source.write_bytes(raw)
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        proc = subprocess.run(
+            [ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source),
+             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(wav)],
+            capture_output=True, text=True, timeout=180,
         )
+        if proc.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
+            detail = proc.stderr.strip()[-700:] or "Unsupported or corrupt audio."
+            raise ValueError(f"Could not decode audio: {detail}")
+        audio, _ = librosa.load(str(wav), sr=SAMPLE_RATE, mono=True)
+    except ValueError:
+        raise
     except Exception as exc:
-        raise ValueError(
-            "Could not decode the audio. "
-            "Please upload a valid audio file."
-        ) from exc
+        raise ValueError("Could not decode the audio. Please upload a valid speech recording.") from exc
+    finally:
+        if tmpdir is not None:
+            tmpdir.cleanup()
 
-    audio = np.asarray(
-        audio,
-        dtype=np.float32,
-    )
-
-    audio = np.nan_to_num(audio)
-
+    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32))
     if audio.size < SAMPLE_RATE:
-        raise ValueError(
-            "Audio must contain at least one second of speech."
-        )
-
+        raise ValueError("Audio must contain at least one second of speech.")
     try:
-        intervals = librosa.effects.split(
-            audio,
-            top_db=30,
-        )
+        intervals = librosa.effects.split(audio, top_db=30)
     except Exception:
         intervals = []
-
     if len(intervals):
-        audio = np.concatenate(
-            [
-                audio[start:end]
-                for start, end in intervals
-            ]
-        )
-
+        audio = np.concatenate([audio[start:end] for start, end in intervals])
     if audio.size < SAMPLE_RATE:
-        raise ValueError(
-            "Not enough speech after silence removal."
-        )
-
-    max_samples = SAMPLE_RATE * 20
-
+        raise ValueError("Not enough speech after silence removal.")
+    max_samples = SAMPLE_RATE * 30
     if len(audio) > max_samples:
-        start = (
-            len(audio) - max_samples
-        ) // 2
-
-        audio = audio[
-            start:start + max_samples
-        ]
-
-    return np.ascontiguousarray(
-        audio,
-        dtype=np.float32,
-    )
+        start = (len(audio) - max_samples) // 2
+        audio = audio[start:start + max_samples]
+    return np.ascontiguousarray(audio, dtype=np.float32)
 
 
 def create_embedding(
