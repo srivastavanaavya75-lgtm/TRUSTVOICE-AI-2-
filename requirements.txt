@@ -8,6 +8,7 @@ scikit-learn>=1.5,<2.0
 onnxruntime>=1.18,<2.0
 reportlab>=4.2,<5.0
 faiss-cpu
-speechbrain>=1.0,<2.0
+speechbrain>=1.1,<2.0
 torch>=2.2,<3.0
 torchaudio>=2.2,<3.0
+flair==0.15.1
