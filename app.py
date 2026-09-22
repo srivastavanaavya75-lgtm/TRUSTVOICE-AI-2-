@@ -1380,7 +1380,7 @@ def apply_antispoof_to_trust(result: dict, source_label: str):
         return
 
     st.session_state.factors["Voice Authenticity"] = int(
-        round(float(anti["bona_fide_probability"]))
+        round(float(anti.get("bona_fide_probability", 0.0) or 0.0))
     )
     verdict = str(anti.get("verdict", ""))
     fused, caps = fuse_with_gates(st.session_state.factors)
@@ -2371,8 +2371,8 @@ if nav == "Dashboard":
 
     with c2:
         if anti:
-            spoof = float(anti["spoof_probability"])
-            bona = float(anti["bona_fide_probability"])
+            spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
+            bona = float(anti.get("bona_fide_probability", 0.0) or 0.0)
             render(f"""
             <div class="card">
               <div class="card-head"><div class="card-title">Voice Authenticity · Countermeasure</div><div class="card-kicker">PRETRAINED</div></div>
@@ -2663,8 +2663,8 @@ elif nav == "Live Analysis":
         <div class="card" style="margin-top:12px">
           <div class="card-title">LIVE VOICE RESULT</div>
           <div class="metric-row"><span>Verdict</span><span>{escape(str(anti["verdict"]))}</span></div>
-          <div class="metric-row"><span>Bona-fide model score</span><span>{float(anti["bona_fide_probability"]):.1f}%</span></div>
-          <div class="metric-row"><span>Spoof model score</span><span>{float(anti["spoof_probability"]):.1f}%</span></div>
+          <div class="metric-row"><span>Bona-fide model score</span><span>{float(anti.get("bona_fide_probability", 0.0) or 0.0):.1f}%</span></div>
+          <div class="metric-row"><span>Spoof model score</span><span>{float(anti.get("spoof_probability", 0.0) or 0.0):.1f}%</span></div>
           <div class="metric-row"><span>Countermeasure score (logit)</span><span>{anti.get("cm_score","—")}</span></div>
           <div class="metric-row"><span>Deterministic windows</span><span>{anti.get("windows_used",1)} (silent dropped: {anti.get("windows_dropped_silent",0)})</span></div>
           <div class="metric-row"><span>Window spread</span><span>{anti.get("confidence_spread",0):.3f}%</span></div>
@@ -2804,8 +2804,8 @@ elif nav == "Audio Forensics":
             """)
         with y:
             if anti:
-                spoof = float(anti["spoof_probability"])
-                bona = float(anti["bona_fide_probability"])
+                spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
+                bona = float(anti.get("bona_fide_probability", 0.0) or 0.0)
                 render(f"""
                 <div class="card">
                   <div class="card-title">Anti-Spoof Countermeasure</div>
