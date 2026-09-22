@@ -247,13 +247,13 @@ init_state()
 
 
 def risk_label(score: int):
-    """Map trust score to the UI risk label without changing any UI markup."""
+    # Score is a TRUST score: higher is safer.
     if score >= 75:
         return "Low Risk", "safe"
     if score >= 50:
         return "Medium Risk", "watch"
     if score >= 30:
-        return "High Risk", "watch"
+        return "High Risk", "high"
     return "Critical Risk", "critical"
 
 
@@ -286,22 +286,19 @@ def compute_fused_score(factors: dict):
 
 
 def fuse_with_gates(factors: dict):
-    """
-    Weighted fusion plus hard safety gates.
+    """Weighted trust fusion with explainable safety caps.
 
-    A weighted average alone lets one near-certain danger signal be diluted by
-    four default-valued factors. Any single factor that is strongly negative
-    therefore caps the final trust score, and the cap that fires is recorded so
-    the decision stays explainable.
+    Factors are TRUST scores: 100 is safer, 0 is riskier. Voice spoof
+    evidence is deliberately not allowed to become an automatic fraud verdict.
+    Conversation evidence decides how strongly that signal should escalate.
     """
     fused = compute_fused_score(factors)
     caps = []
 
+    # A single weak/uncertain factor should reduce confidence, not immediately
+    # block a conversation. Strong credential/payment signals can still trigger
+    # a hard cap when combined with the voice evidence.
     gate_rules = [
-        # Voice authenticity is evidence, not a fraud verdict. In particular,
-        # out-of-domain anti-spoof models can flag genuine recordings.
-        # Keep it out of hard gates and let conversation evidence arbitrate.
-        ("Speaker Identity", 25, 35, "Speaker identity could not be corroborated"),
         ("Intent Safety", 20, 22, "Request intent matches a credential or payment-extraction pattern"),
         ("Intent Safety", 40, 45, "Request intent is sensitive and unverified"),
         ("Behavior Safety", 20, 30, "Pressure, urgency or secrecy pattern detected"),
@@ -314,7 +311,17 @@ def fuse_with_gates(factors: dict):
             capped = cap
             caps.append(reason)
 
-    return int(capped), caps
+    # Voice authenticity is a supporting signal here. The conversation layer
+    # below decides whether a spoof signal is merely REVIEW-worthy or dangerous.
+    voice = float(factors.get("Voice Authenticity", 94))
+    if voice < 25 and capped > 60:
+        capped = 60
+        caps.append("Strong synthetic-voice evidence; independent verification recommended")
+    elif voice < 45 and capped > 70:
+        capped = 70
+        caps.append("Voice authenticity evidence is weak or uncertain")
+
+    return int(max(0, min(100, capped))), caps
 
 
 # ============================================================
@@ -324,7 +331,13 @@ def fuse_with_gates(factors: dict):
 REQUEST_INTELLIGENCE_PATTERNS = {
     "OTP / Verification Code": [r"\botp\b", r"one[- ]?time password", r"verification code", r"security code", r"six[- ]?digit code"],
     "UPI PIN": [r"\bupi\s*pin\b", r"upi.*pin", r"pin.*upi"],
-    "Password / Login": [r"password", r"net banking", r"login credentials", r"passcode"],
+    "Password / Login": [
+        r"\b(password|passcode)\b.*\b(give|tell|share|send|read|provide|forward|confirm|type|enter)\b",
+        r"\b(give|tell|share|send|read|provide|forward)\b.*\b(password|passcode)\b",
+        r"\b(net banking|login credentials)\b",
+        r"\b(password|passcode)\b.*\b(chahiye|batao|bataiye|de do|bhejo|share karo)\b",
+        r"\b(chahiye|batao|bataiye|de do|bhejo|share karo)\b.*\b(password|passcode)\b",
+    ],
     "Card / CVV": [r"\bcvv\b", r"card number", r"debit card", r"credit card", r"expiry date"],
     "Money Transfer": [r"transfer", r"send the money", r"make the payment", r"wire the amount", r"upi transfer", r"bank account"],
     "Personal Information": [r"aadhaar", r"pan card", r"date of birth", r"address", r"mother.?s maiden", r"personal (details|information)"],
@@ -353,80 +366,21 @@ def _pattern_hits(text: str, groups: dict):
     return hits
 
 
-def _has_request_verb(text: str) -> bool:
-    """Detect an actionable ask rather than merely mentioning a sensitive word."""
-    clean = _clean_text(text).lower()
-    patterns = [
-        r"\b(batao|batana|bata dena|share|send|provide|give|tell|forward|type|enter|read|dikhao|bhejo|dena|chahiye|mang raha|maang raha|maangta|mango)\b",
-        r"\b(बताओ|बताना|दे देना|भेजो|चाहिए|मांग रहा|माँग रहा|दिखाओ|शेयर)\b",
-        r"\b(can you|could you|please|i need|i want|send me|tell me|give me)\b",
-    ]
-    return any(re.search(p, clean, flags=re.IGNORECASE) for p in patterns)
-
-
-def _benign_context(text: str) -> bool:
-    """Recognise common legitimate contexts without treating them as proof of safety."""
-    clean = _clean_text(text).lower()
-    patterns = [
-        r"\blic\b", r"insurance", r"policy", r"premium", r"nominee", r"claim",
-        r"\bform\b", r"application", r"document", r"paperwork", r"office work",
-        r"college", r"project", r"assignment", r"resume", r"registration",
-        r"friend", r"classmate", r"colleague", r"family", r"personal work",
-    ]
-    return any(re.search(p, clean, flags=re.IGNORECASE) for p in patterns)
-
-
-def _high_risk_social_context(text: str) -> bool:
-    clean = _clean_text(text).lower()
-    patterns = [
-        r"\b(bank|security|police|cyber cell|income tax|government|fraud team)\b",
-        r"\b(immediately|right now|urgent|hurry|quickly|within \d+ (minutes?|hours?))\b",
-        r"\b(otp|upi pin|cvv|verification code|security code)\b",
-        r"\b(account.*(block|freeze|suspend|close)|legal action|arrest|penalty)\b",
-        r"\b(do not tell|don't tell|keep.*secret|don't hang up|stay on the line)\b",
-        r"\b(anydesk|teamviewer|remote access|screen share)\b",
-    ]
-    return any(re.search(p, clean, flags=re.IGNORECASE) for p in patterns)
-
-
 def analyze_request_intelligence(text: str):
     hits = _pattern_hits(text, REQUEST_INTELLIGENCE_PATTERNS)
-    actionable = _has_request_verb(text)
-    benign = _benign_context(text)
-    high_risk_context = _high_risk_social_context(text)
-
-    # Mentioning a password/card/etc. is not equivalent to asking for it.
-    # Password requests can also occur in legitimate workflows. Escalation is
-    # therefore driven by an actionable request plus context.
-    actionable_hits = list(hits) if actionable else []
-    if not actionable and hits:
-        highest = "LOW"
-    elif any(x in actionable_hits for x in ["OTP / Verification Code", "UPI PIN", "Card / CVV"]):
-        highest = "CRITICAL" if high_risk_context else "HIGH"
-    elif "Remote Access" in actionable_hits:
-        highest = "CRITICAL" if high_risk_context else "HIGH"
-    elif "Password / Login" in actionable_hits:
-        highest = "HIGH" if high_risk_context else ("MEDIUM" if benign else "HIGH")
-    elif actionable_hits:
-        highest = "HIGH" if high_risk_context else "MEDIUM"
-    else:
-        highest = "LOW"
-
-    primary = actionable_hits[0] if actionable_hits else (hits[0] if hits else "No sensitive request detected")
+    primary = hits[0] if hits else "No sensitive request detected"
     return {
         "primary_request": primary,
         "requests": hits,
-        "actionable_requests": actionable_hits,
-        "request_count": len(actionable_hits),
-        "sensitive": bool(actionable_hits),
-        "actionable": actionable,
-        "benign_context": benign,
-        "highest_severity": highest,
+        "request_count": len(hits),
+        "sensitive": bool(hits),
+        "highest_severity": "CRITICAL" if any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"]) else ("HIGH" if hits else "LOW"),
     }
 
 
 def analyze_social_engineering(text: str):
     hits = _pattern_hits(text, SOCIAL_ENGINEERING_PATTERNS)
+    # Combination signal is intentionally stronger than isolated cues.
     severity = min(100, len(hits) * 18 + max(0, len(hits) - 2) * 10)
     return {
         "signals": hits,
@@ -437,7 +391,13 @@ def analyze_social_engineering(text: str):
 
 
 def conversation_firewall_score(factors: dict, text: str, previous_score=None):
-    """Fuse voice, identity and conversation evidence into a 0-100 trust score."""
+    """Fuse voice, identity and conversation evidence into a 0-100 TRUST score.
+
+    100 = low concern / high trust. 0 = critical risk.
+    A synthetic-voice result by itself is not treated as fraud. The score
+    escalates strongly when spoof evidence co-occurs with credential, payment,
+    remote-access or social-engineering requests.
+    """
     request = analyze_request_intelligence(text)
     social = analyze_social_engineering(text)
     fused, caps = fuse_with_gates(factors)
@@ -458,26 +418,54 @@ def conversation_firewall_score(factors: dict, text: str, previous_score=None):
         risk_components["Context"] * 0.15
     )
 
+    # Explicit conversation evidence adds risk, but only when it is actually
+    # present. This prevents a single word such as "password" from deciding
+    # the whole call.
     extra = 0.0
-    if request.get("actionable_requests"):
-        extra += min(12, request["request_count"] * 4)
+    if request["requests"]:
+        extra += min(18, request["request_count"] * 6)
+    if social["count"] >= 1:
+        extra += 6
     if social["count"] >= 2:
         extra += 8
     if social["count"] >= 4:
         extra += 8
-    if request["primary_request"] in {"OTP / Verification Code", "UPI PIN", "Card / CVV", "Remote Access"} and request.get("actionable"):
-        extra += 8
-    elif request["primary_request"] == "Password / Login" and request.get("actionable"):
-        # A password request is sensitive, but not automatically a scam.
-        # Escalate strongly only when paired with social-engineering context.
-        extra += 8 if social["count"] >= 1 or not request.get("benign_context") else 2
 
-    # Escalation is based on a worsening trajectory, not a fake fixed score.
+    critical_request = request["primary_request"] in {
+        "OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"
+    }
+    financial_request = request["primary_request"] in {
+        "Money Transfer", "Card / CVV"
+    }
+    voice_spoof = float(factors.get("Voice Authenticity", 94)) < 30
+
+    if critical_request:
+        extra += 12
+    elif financial_request:
+        extra += 8
+
+    # Trajectory escalation is only used when a prior analyzed state exists.
     if previous_score is not None and weighted_risk > (100 - float(previous_score)) + 8:
         extra += 5
 
-    risk = min(100, max(float(weighted_risk), weighted_risk + extra))
+    risk = min(100.0, weighted_risk + extra)
     trust = int(round(100 - risk))
+
+    # Strong combined evidence gets an explicit intervention cap. This is the
+    # key distinction: spoof + dangerous request is much stronger than spoof
+    # alone. A real voice making the same dangerous request can also escalate.
+    if critical_request and voice_spoof and trust > 25:
+        trust = 25
+        caps.append("Synthetic-voice evidence combined with a credential/remote-access request")
+    elif financial_request and voice_spoof and trust > 35:
+        trust = 35
+        caps.append("Synthetic-voice evidence combined with a financial request")
+    elif critical_request and social["count"] >= 2 and trust > 30:
+        trust = 30
+        caps.append("Credential request combined with multiple social-engineering indicators")
+    elif voice_spoof and trust > 60:
+        trust = 60
+        caps.append("Strong synthetic-voice evidence; verify the caller before sensitive action")
 
     if trust >= 75:
         level, action = "LOW", "CONTINUE / MONITOR"
@@ -488,16 +476,13 @@ def conversation_firewall_score(factors: dict, text: str, previous_score=None):
     else:
         level, action = "CRITICAL", "STOP / BLOCK REQUEST"
 
-    if caps:
-        trust = min(trust, int(fused))
-
     breakdown = {
         "weighted_risk": round(weighted_risk, 1),
         "additional_risk": round(extra, 1),
         "risk_components": risk_components,
         "request_intelligence": request,
         "social_engineering": social,
-        "caps": caps,
+        "caps": list(dict.fromkeys(caps)),
         "trust_score": int(max(0, min(100, trust))),
         "risk_level": level,
         "action": action,
@@ -788,18 +773,18 @@ def analyse_conversation(text: str):
     conf = float(intent.get("confidence", 0.0)) / 100.0
     intent_safety = 95 - (95 - floor) * conf
 
-    # Sensitive words are evidence, not an automatic verdict. Distinguish an
-    # actionable credential request from a benign mention such as an LIC form.
-    if intent.get("credential_terms"):
-        actionable = _has_request_verb(clean)
-        benign = _benign_context(clean)
-        high_risk = _high_risk_social_context(clean)
-        terms = set(intent.get("credential_terms") or [])
-        hard_terms = {"OTP", "PIN", "CVV", "Verification code"}
-        if actionable and terms & hard_terms:
-            intent_safety = min(intent_safety, 25 if high_risk else 48)
-        elif actionable and "Password" in terms:
-            intent_safety = min(intent_safety, 55 if benign and not high_risk else 35)
+    # A credential word is evidence, not a verdict. Require request language or
+    # a high-severity credential such as OTP/UPI PIN before applying a strong
+    # intent penalty. This avoids flagging benign conversations that mention
+    # a password while still escalating explicit credential extraction.
+    credential_terms = set(intent.get("credential_terms") or [])
+    request_language = bool(re.search(
+        r"\b(give|tell|share|send|read|provide|forward|confirm|enter|type|" +
+        r"बताओ|बताना|भेजो|बताइए|दे दो|शेयर|चाहिए)\b", clean, flags=re.IGNORECASE
+    ))
+    high_severity_credential = bool(credential_terms & {"OTP", "CVV", "PIN", "Verification code"})
+    if credential_terms and (request_language or high_severity_credential):
+        intent_safety = min(intent_safety, 28 if high_severity_credential else 45)
 
     behavior_safety, context_safety = 94.0, 94.0
     reasons = []
@@ -1461,18 +1446,17 @@ def apply_antispoof_to_trust(result: dict, source_label: str):
     fused, caps = fuse_with_gates(st.session_state.factors)
 
     if verdict == "LIKELY SYNTHETIC / SPOOF":
-        # Anti-spoof is one evidence stream. It must not turn a benign
-        # conversation into a critical fraud verdict by itself.
-        st.session_state.score = fused
-        st.session_state.scenario = "Suspicious Voice Signal"
+        # Do not call a spoofed voice a fraud call before the transcript is
+        # analyzed. This is only a voice-authenticity warning at this stage.
+        st.session_state.score = min(fused, 60)
+        st.session_state.scenario = "Potential Voice Spoof"
         st.session_state.action_status = "VERIFY CALLER"
-        caps.append("Voice authenticity signal is suspicious; conversation context still required")
     elif verdict == "LIKELY AUTHENTIC":
         st.session_state.score = fused
         st.session_state.scenario = "Voice Appears Authentic"
         st.session_state.action_status = "Monitoring"
     else:
-        st.session_state.score = fused
+        st.session_state.score = min(fused, 70)
         st.session_state.scenario = "Uncertain Voice Signal"
         st.session_state.action_status = "Review audio / verify independently"
         caps.append(verdict.replace("INCONCLUSIVE / ", "Inconclusive: ").title())
@@ -1619,60 +1603,31 @@ def _apply_transcript_analysis(transcript: str):
     spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
     similarity = float((st.session_state.get("speaker_match") or {}).get("similarity", 0.0) or 0.0)
 
-    # Keep the raw anti-spoof and speaker evidence separate. A cloned voice can
-    # closely match a registered speaker, so the combination becomes an
-    # impersonation signal only when the conversation also contains a risky ask.
+    if spoof >= 70:
+        st.session_state.factors["Voice Authenticity"] = min(
+            st.session_state.factors.get("Voice Authenticity", 94), 25
+        )
     if similarity >= 80:
         st.session_state.factors["Speaker Identity"] = min(
             st.session_state.factors.get("Speaker Identity", 94), 45
         )
 
     result = apply_conversation_firewall(transcript.strip(), previous_score)
-    request = result.get("request_intelligence", {})
-    social = result.get("social_engineering", {})
-    dangerous_request = bool(request.get("actionable_requests")) and (
-        request.get("highest_severity") in {"HIGH", "CRITICAL"}
-        or social.get("count", 0) >= 2
-    )
 
-    if spoof >= 70 and similarity >= 80 and dangerous_request:
-        st.session_state.score = min(st.session_state.score, 20)
+    if spoof >= 70 and similarity >= 80 and st.session_state.score <= 30:
         st.session_state.scenario = "Potential Voice-Cloning Impersonation"
         st.session_state.action_status = "STOP / BLOCK REQUEST · TRUST HANDSHAKE REQUIRED"
         st.session_state.risk_explanation.extend([
             "AI-generated / spoofed voice detected.",
             "High registered-speaker similarity detected.",
-            "Dangerous request context detected.",
             "Potential voice-cloning impersonation attack.",
         ])
-    elif spoof >= 70 and not dangerous_request:
-        st.session_state.risk_explanation.append(
-            "Synthetic-voice signal detected, but no strong social-engineering request was found."
-        )
     elif st.session_state.score < 30:
         st.session_state.scenario = "High-Risk / Dangerous Request"
     elif st.session_state.score < 50:
         st.session_state.scenario = "Suspicious Interaction"
     else:
         st.session_state.scenario = "Conversation Risk Assessment"
-
-    # Final safety guard: a suspicious acoustic signal alone is not fraud.
-    # If the conversation is normal/benign and contains no social-engineering
-    # pressure, allow the conversational evidence to determine the trust level.
-    req = st.session_state.get("request_intelligence") or {}
-    social = st.session_state.get("social_engineering") or {}
-    if (
-        spoof >= 70
-        and not req.get("actionable_requests")
-        and social.get("count", 0) == 0
-        and st.session_state.score < 50
-    ):
-        st.session_state.score = max(50, int(st.session_state.score))
-        st.session_state.scenario = "Voice Signal Uncertain · Conversation Appears Benign"
-        st.session_state.action_status = "VERIFY CALLER"
-        st.session_state.risk_explanation.append(
-            "No actionable fraud request or social-engineering pressure detected."
-        )
 
     st.session_state.risk_explanation = list(dict.fromkeys(st.session_state.risk_explanation))
     st.session_state.analysis_done = True
