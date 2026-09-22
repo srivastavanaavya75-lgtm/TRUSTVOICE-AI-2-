@@ -346,6 +346,38 @@ REQUEST_INTELLIGENCE_PATTERNS = {
     "Suspicious Link": [r"click (this|the) link", r"open (this|the) link", r"link.*verify", r"shortened link", r"bit\.ly", r"tinyurl"],
 }
 
+# Hindi/Hinglish patterns commonly produced by multilingual ASR. These are
+# additive signals, not standalone fraud verdicts.
+REQUEST_INTELLIGENCE_PATTERNS.update({
+    "OTP / Verification Code": REQUEST_INTELLIGENCE_PATTERNS["OTP / Verification Code"] + [
+        r"ओ\s*टी\s*पी", r"वन\s*टाइम\s*पासवर्ड", r"वेरिफिकेशन\s*कोड", r"सिक्योरिटी\s*कोड",
+    ],
+    "UPI PIN": REQUEST_INTELLIGENCE_PATTERNS["UPI PIN"] + [
+        r"यूपीआई\s*पिन", r"upi\s*pin",
+    ],
+    "Password / Login": REQUEST_INTELLIGENCE_PATTERNS["Password / Login"] + [
+        r"पासवर्ड\s*(बताओ|बताइए|बता दो|दे दो|भेजो|शेयर करो|चाहिए)",
+        r"(बताओ|बताइए|बता दो|दे दो|भेजो|शेयर करो)\s*(अपना\s*)?पासवर्ड",
+        r"पासकोड|लॉग\s*इन\s*क्रेडेंशियल",
+    ],
+    "Card / CVV": REQUEST_INTELLIGENCE_PATTERNS["Card / CVV"] + [
+        r"सीवीवी", r"कार्ड\s*(नंबर|डिटेल|डिटेल्स)",
+    ],
+    "Money Transfer": REQUEST_INTELLIGENCE_PATTERNS["Money Transfer"] + [
+        r"पैसे\s*(भेजो|भेजिए|ट्रांसफर|दे दो)", r"पेमेंट\s*(करो|करिए|भेजो)",
+        r"रकम\s*(भेजो|ट्रांसफर करो)",
+    ],
+    "Personal Information": REQUEST_INTELLIGENCE_PATTERNS["Personal Information"] + [
+        r"आधार", r"पैन\s*कार्ड", r"जन्म\s*तिथि", r"पता\s*(बताओ|भेजो|चाहिए)",
+    ],
+    "Remote Access": REQUEST_INTELLIGENCE_PATTERNS["Remote Access"] + [
+        r"स्क्रीन\s*शेयर", r"रिमोट\s*एक्सेस", r"एनीडेस्क", r"टीमव्यूअर",
+    ],
+    "Suspicious Link": REQUEST_INTELLIGENCE_PATTERNS["Suspicious Link"] + [
+        r"लिंक\s*(पर|पे)\s*(क्लिक|करो)", r"लिंक\s*खोलो",
+    ],
+})
+
 SOCIAL_ENGINEERING_PATTERNS = {
     "Authority impersonation": [r"bank security", r"police", r"income tax", r"government", r"cyber cell", r"fraud team", r"security department", r"manager", r"boss"],
     "Urgency pressure": [r"immediately", r"right now", r"urgent", r"hurry", r"quickly", r"within \d+ (minutes?|hours?)", r"today itself"],
@@ -355,6 +387,29 @@ SOCIAL_ENGINEERING_PATTERNS = {
     "Artificial deadline": [r"last chance", r"final warning", r"expires today", r"within 10 minutes", r"before evening"],
 }
 
+SOCIAL_ENGINEERING_PATTERNS.update({
+    "Authority impersonation": SOCIAL_ENGINEERING_PATTERNS["Authority impersonation"] + [
+        r"बैंक\s*(से|की)\s*(सिक्योरिटी|सुरक्षा)", r"बैंक\s*से\s*बोल",
+        r"पुलिस\s*से\s*बोल", r"साइबर\s*सेल", r"इनकम\s*टैक्स", r"सरकारी\s*विभाग",
+    ],
+    "Urgency pressure": SOCIAL_ENGINEERING_PATTERNS["Urgency pressure"] + [
+        r"अभी", r"तुरंत", r"जल्दी", r"फौरन", r"इसी\s*वक्त", r"आज\s*ही",
+    ],
+    "Threat / fear": SOCIAL_ENGINEERING_PATTERNS["Threat / fear"] + [
+        r"खाता\s*(बंद|ब्लॉक|फ्रीज|जाम)", r"कानूनी\s*कार्रवाई", r"पुलिस\s*केस", r"जुर्माना",
+    ],
+    "Secrecy / isolation": SOCIAL_ENGINEERING_PATTERNS["Secrecy / isolation"] + [
+        r"किसी\s*(को|से)\s*मत\s*(बताओ|बताना|कहना)", r"किसी\s*को\s*मत\s*बताना",
+        r"फोन\s*मत\s*काटना", r"कॉल\s*मत\s*काटना",
+    ],
+    "Verification bypass": SOCIAL_ENGINEERING_PATTERNS["Verification bypass"] + [
+        r"वेरिफाई\s*करने\s*की\s*जरूरत\s*नहीं", r"चेक\s*करने\s*की\s*जरूरत\s*नहीं",
+        r"मुझपर\s*भरोसा\s*करो",
+    ],
+    "Artificial deadline": SOCIAL_ENGINEERING_PATTERNS["Artificial deadline"] + [
+        r"आखिरी\s*मौका", r"आज\s*तक", r"अभी\s*नहीं\s*तो",
+    ],
+})
 
 def _pattern_hits(text: str, groups: dict):
     clean = _clean_text(text)
@@ -367,14 +422,38 @@ def _pattern_hits(text: str, groups: dict):
 
 
 def analyze_request_intelligence(text: str):
-    hits = _pattern_hits(text, REQUEST_INTELLIGENCE_PATTERNS)
+    clean = _clean_text(text)
+    hits = _pattern_hits(clean, REQUEST_INTELLIGENCE_PATTERNS)
+
+    # Mentioning a credential is not the same as requesting it. This prevents
+    # lines such as "never share your OTP" or "I forgot my password" from
+    # becoming a credential-extraction event.
+    request_words = bool(re.search(
+        r"\b(give|tell|share|send|read|provide|forward|confirm|type|enter|show|" +
+        r"बताओ|बताइए|बता दो|दे दो|भेजो|शेयर|चाहिए|दिखाओ|डालो)\b",
+        clean, flags=re.IGNORECASE
+    ))
+    negated = bool(re.search(
+        r"(do not|don't|never|not share|मत बताओ|मत देना|किसी को मत|शेयर मत|न देना)",
+        clean, flags=re.IGNORECASE
+    ))
+
+    # High-severity credential phrases remain strong even when ASR omitted a
+    # classic English request verb, but explicit negation cancels that signal.
+    high_cred = any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Remote Access"])
+    if not request_words and not high_cred:
+        hits = [x for x in hits if x not in {"Password / Login", "Card / CVV", "Personal Information"}]
+    if negated:
+        hits = []
+
     primary = hits[0] if hits else "No sensitive request detected"
+    critical = {"OTP / Verification Code", "UPI PIN", "Remote Access"}
     return {
         "primary_request": primary,
         "requests": hits,
         "request_count": len(hits),
         "sensitive": bool(hits),
-        "highest_severity": "CRITICAL" if any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"]) else ("HIGH" if hits else "LOW"),
+        "highest_severity": "CRITICAL" if any(x in hits for x in critical) else ("HIGH" if hits else "LOW"),
     }
 
 
@@ -432,8 +511,11 @@ def conversation_firewall_score(factors: dict, text: str, previous_score=None):
         extra += 8
 
     critical_request = request["primary_request"] in {
-        "OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"
-    }
+        "OTP / Verification Code", "UPI PIN", "Remote Access"
+    } or (
+        request["primary_request"] == "Password / Login"
+        and social["count"] >= 1
+    )
     financial_request = request["primary_request"] in {
         "Money Transfer", "Card / CVV"
     }
@@ -652,6 +734,13 @@ CONTEXT_CUES = [
     (r"\b(remote (access|desktop)|anydesk|teamviewer|screen share)\b", 32, "Remote control requested"),
 ]
 
+BENIGN_CONTEXT_PATTERNS = [
+    (r"\b(lic|insurance|policy|premium|policy number|claim|renewal|form|application|documentation|document|submission)\b", "Legitimate service/form context"),
+    (r"\b(friend|classmate|colleague|team|project|assignment|college|office work)\b", "Familiar/work context"),
+    (r"\b(official (website|branch|office)|visit the (official )?branch)\b", "Official verification path"),
+    (r"(एलआईसी|बीमा|पॉलिसी|प्रीमियम|फॉर्म|आवेदन|दस्तावेज|दोस्त|क्लासमेट|प्रोजेक्ट|कॉलेज)", "Legitimate Hindi/Hinglish context"),
+]
+
 CREDENTIAL_PATTERNS = [
     (r"\b(otp|o\.?t\.?p\.?|one[- ]time password)\b", "OTP"),
     (r"\b(cvv|cvc)\b", "CVV"),
@@ -806,6 +895,14 @@ def analyse_conversation(text: str):
         extra = 8 * (len(reasons) - 2)
         behavior_safety -= extra
         context_safety -= extra
+
+    benign_context = [label for pattern, label in BENIGN_CONTEXT_PATTERNS
+                      if re.search(pattern, clean, flags=re.IGNORECASE)]
+    # Benign context is only a soft mitigating signal. It never overrides an
+    # OTP/UPI/remote-access request or social-engineering evidence.
+    if benign_context and not reasons:
+        context_safety = min(98.0, context_safety + 3.0)
+        reasons.append(benign_context[0])
 
     return {
         "intent_prediction": intent,
@@ -1700,14 +1797,12 @@ def apply_p3_speaker_signal(raw: bytes, filename: str):
             f"Moderate similarity to registered speaker: {result.get('speaker')} ({similarity:.1f}%)."
         )
     if spoof >= 70 and similarity >= 80:
-        st.session_state.score = min(int(st.session_state.score), 15)
-        st.session_state.scenario = "Potential Voice-Cloning Impersonation"
-        st.session_state.action_status = "Trust Handshake required · Sensitive action restricted"
+        # Speaker similarity + spoof is evidence of possible cloning, not proof
+        # of fraud. Let the conversation firewall make the final decision.
         st.session_state.risk_explanation.extend([
             "AI-generated / spoofed voice detected.",
             "High registered-speaker similarity detected.",
-            "Voice authenticity and speaker identity signals conflict.",
-            "Potential voice-cloning impersonation attack.",
+            "Possible voice-cloning impersonation signal; conversation context required.",
         ])
 
 
@@ -2863,18 +2958,43 @@ elif nav == "Audio Forensics":
             apply_antispoof_to_trust(result, f"Audio · {uploaded.name}")
             apply_p3_speaker_signal(raw, uploaded.name)
 
-            if transcript_text.strip():
-                text_analysis = analyse_conversation(transcript_text)
-                st.session_state.transcript = transcript_text.strip()
-                st.session_state.intent_prediction = text_analysis["intent_prediction"]
-                for key in ["Intent Safety", "Behavior Safety", "Context Safety"]:
-                    st.session_state.factors[key] = text_analysis[key]
-                fused, caps = fuse_with_gates(st.session_state.factors)
-                if str((result.get("anti_spoof") or {}).get("verdict", "")) == "LIKELY SYNTHETIC / SPOOF":
-                    fused = min(fused, 25)
-                st.session_state.score = fused
-                st.session_state.risk_explanation = (
-                    list(st.session_state.risk_explanation) + caps + text_analysis["reasons"]
+            # Audio Forensics now uses the same automatic STT + conversation firewall
+            # pipeline as Audio & Transcript Analysis. Manual text remains an optional
+            # override, so the UI stays unchanged while the analysis becomes complete.
+            final_transcript = transcript_text.strip()
+            transcript_meta = {}
+            if not final_transcript:
+                try:
+                    auto_transcript = transcribe_audio_bytes(raw, uploaded.name)
+                    final_transcript = str(auto_transcript.get("text", "") or "").strip()
+                    transcript_meta = auto_transcript
+                    st.session_state.transcript_segments = auto_transcript.get("segments", [])
+                    st.session_state.transcript_language = auto_transcript.get("language")
+                    st.session_state.transcript_source = auto_transcript.get("model")
+                except Exception as exc:
+                    st.session_state.transcript = ""
+                    st.session_state.transcript_source = None
+                    st.session_state.risk_explanation.append(
+                        f"Automatic transcription unavailable: {type(exc).__name__}"
+                    )
+
+            if final_transcript:
+                text_analysis = _apply_transcript_analysis(final_transcript)
+                st.session_state.last_analysis["transcript"] = final_transcript
+                st.session_state.last_analysis["transcript_meta"] = {
+                    "language": transcript_meta.get("language", st.session_state.get("transcript_language")),
+                    "language_probability": transcript_meta.get("language_probability"),
+                    "model": transcript_meta.get("model", st.session_state.get("transcript_source")),
+                    "segments": transcript_meta.get("segments", st.session_state.get("transcript_segments", [])),
+                }
+                st.session_state.risk_explanation = list(dict.fromkeys(
+                    st.session_state.risk_explanation + text_analysis.get("reasons", [])
+                ))
+            else:
+                st.session_state.scenario = "Voice Signal Only"
+                st.session_state.action_status = "VERIFY CALLER"
+                st.session_state.risk_explanation.append(
+                    "No transcript was available; conversation risk could not be assessed."
                 )
 
             st.rerun()
