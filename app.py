@@ -1285,7 +1285,7 @@ def cached_audio_scores(raw: bytes, filename: str, model_key: str):
 
     analysis_raw, analysis_suffix = raw, original_suffix
 
-    if original_suffix in {".mp4", ".webm", ".mov", ".mkv", ".avi"}:
+    if original_suffix != ".wav":
         try:
             import imageio_ffmpeg
             ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -1432,45 +1432,39 @@ def _get_whisper_model():
 
 
 def _canonical_audio_for_asr(raw: bytes, filename: str):
-    suffix = Path(filename).suffix.lower() or ".wav"
-    video_suffixes = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+    """Decode any common audio/video container to mono 16 kHz PCM WAV via FFmpeg.
+
+    This keeps the rest of the pipeline format-agnostic. FFmpeg is supplied by
+    imageio-ffmpeg, so the Streamlit deployment does not depend on a system
+    ffmpeg executable being installed separately.
+    """
+    suffix = Path(filename).suffix.lower() or ".bin"
     tmpdir = tempfile.TemporaryDirectory()
     work = Path(tmpdir.name)
     source = work / f"input{suffix}"
     source.write_bytes(raw)
     wav = work / "audio_16k.wav"
 
-    if suffix in video_suffixes:
-        try:
-            import imageio_ffmpeg
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        except ImportError as exc:
-            tmpdir.cleanup()
-            raise RuntimeError("Video transcription requires imageio-ffmpeg.") from exc
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as exc:
+        tmpdir.cleanup()
+        raise RuntimeError("Universal audio decoding requires imageio-ffmpeg.") from exc
 
-        proc = subprocess.run(
-            [ffmpeg_exe, "-y", "-i", str(source), "-vn", "-ac", "1",
-             "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
-            capture_output=True, text=True, timeout=180,
-        )
-        if proc.returncode != 0 or not wav.exists():
-            err = proc.stderr.strip()[-700:] or "No audio track found."
-            tmpdir.cleanup()
-            raise RuntimeError(f"Audio extraction failed: {err}")
-    else:
-        if librosa is None:
-            tmpdir.cleanup()
-            raise RuntimeError("librosa is required for audio canonicalization.")
-        try:
-            import soundfile as sf
-            y, _ = librosa.load(io.BytesIO(raw), sr=16000, mono=True)
-            y = np.asarray(y, dtype=np.float32)
-            if y.size == 0:
-                raise ValueError("No audio samples found.")
-            sf.write(str(wav), y, 16000, subtype="PCM_16")
-        except Exception:
-            tmpdir.cleanup()
-            raise
+    proc = subprocess.run(
+        [
+            ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(source),
+            "-vn", "-ac", "1", "-ar", "16000",
+            "-c:a", "pcm_s16le", str(wav),
+        ],
+        capture_output=True, text=True, timeout=180,
+    )
+    if proc.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
+        err = proc.stderr.strip()[-900:] or "Unsupported format, invalid file, or no audio stream found."
+        tmpdir.cleanup()
+        raise RuntimeError(f"Audio decoding failed: {err}")
 
     return tmpdir, wav
 
@@ -1744,7 +1738,7 @@ def build_incident_report():
     """)
     home_audio = st.file_uploader(
         "Upload audio/video for complete analysis",
-        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
+        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
         key="home_complete_audio",
     )
     if home_audio is not None:
@@ -2745,7 +2739,7 @@ elif nav == "Audio Forensics":
 
     uploaded = st.file_uploader(
         "Drop an audio or video sample here",
-        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
+        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
         key="cyber_gold_upload",
     )
     if uploaded:
@@ -2904,7 +2898,7 @@ elif nav == "Audio & Transcript Analysis":
     )
     uploaded_transcript_audio = st.file_uploader(
         "Or upload an audio/video file",
-        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
+        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
         key="transcript_page_upload",
     )
     chosen = transcript_audio or uploaded_transcript_audio
@@ -3043,7 +3037,7 @@ elif nav == "Demo Audio & Conversations":
     st.markdown("### Optional real-audio validation")
     demo_audio = st.file_uploader(
         "Attach actual demo audio for the complete voice + transcript pipeline",
-        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
+        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
         key="demo_real_audio",
     )
     if demo_audio and st.button("◉ RUN FULL DEMO AUDIO ANALYSIS", key="run_full_demo_audio", use_container_width=True):
@@ -3106,7 +3100,7 @@ else:
             name = st.text_input("Registered speaker name", placeholder="Example: User A", key="registry_name")
             samples = st.file_uploader(
                 "Upload 2–5 clean voice samples",
-                type=["wav", "mp3", "m4a", "flac", "ogg", "webm"],
+                type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
                 accept_multiple_files=True,
                 key="speaker_enrollment_samples",
             )
@@ -3438,7 +3432,7 @@ else:
 
         eval_files = st.file_uploader(
             "Evaluation dataset",
-            type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov", "mkv", "avi"],
+            type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
             accept_multiple_files=True,
             key="evaluation_dataset",
         )
