@@ -247,13 +247,10 @@ init_state()
 
 
 def risk_label(score: int):
-    # Score is a TRUST score: higher is safer.
     if score >= 75:
         return "Low Risk", "safe"
-    if score >= 50:
-        return "Medium Risk", "watch"
-    if score >= 30:
-        return "High Risk", "high"
+    if score >= 40:
+        return "Elevated Risk", "watch"
     return "Critical Risk", "critical"
 
 
@@ -286,19 +283,22 @@ def compute_fused_score(factors: dict):
 
 
 def fuse_with_gates(factors: dict):
-    """Weighted trust fusion with explainable safety caps.
+    """
+    Weighted fusion plus hard safety gates.
 
-    Factors are TRUST scores: 100 is safer, 0 is riskier. Voice spoof
-    evidence is deliberately not allowed to become an automatic fraud verdict.
-    Conversation evidence decides how strongly that signal should escalate.
+    A weighted average alone lets one near-certain danger signal be diluted by
+    four default-valued factors. Any single factor that is strongly negative
+    therefore caps the final trust score, and the cap that fires is recorded so
+    the decision stays explainable.
     """
     fused = compute_fused_score(factors)
     caps = []
 
-    # A single weak/uncertain factor should reduce confidence, not immediately
-    # block a conversation. Strong credential/payment signals can still trigger
-    # a hard cap when combined with the voice evidence.
     gate_rules = [
+        # Voice authenticity is intentionally NOT a hard gate. A spoof result
+        # alone means the audio needs verification, not that the conversation
+        # is fraudulent.
+        ("Speaker Identity", 25, 35, "Speaker identity could not be corroborated"),
         ("Intent Safety", 20, 22, "Request intent matches a credential or payment-extraction pattern"),
         ("Intent Safety", 40, 45, "Request intent is sensitive and unverified"),
         ("Behavior Safety", 20, 30, "Pressure, urgency or secrecy pattern detected"),
@@ -311,17 +311,7 @@ def fuse_with_gates(factors: dict):
             capped = cap
             caps.append(reason)
 
-    # Voice authenticity is a supporting signal here. The conversation layer
-    # below decides whether a spoof signal is merely REVIEW-worthy or dangerous.
-    voice = float(factors.get("Voice Authenticity", 94))
-    if voice < 25 and capped > 60:
-        capped = 60
-        caps.append("Strong synthetic-voice evidence; independent verification recommended")
-    elif voice < 45 and capped > 70:
-        capped = 70
-        caps.append("Voice authenticity evidence is weak or uncertain")
-
-    return int(max(0, min(100, capped))), caps
+    return int(capped), caps
 
 
 # ============================================================
@@ -329,87 +319,80 @@ def fuse_with_gates(factors: dict):
 # ============================================================
 
 REQUEST_INTELLIGENCE_PATTERNS = {
-    "OTP / Verification Code": [r"\botp\b", r"one[- ]?time password", r"verification code", r"security code", r"six[- ]?digit code"],
-    "UPI PIN": [r"\bupi\s*pin\b", r"upi.*pin", r"pin.*upi"],
+    "OTP / Verification Code": [
+        r"\botp\b", r"one[- ]?time password", r"verification code", r"security code",
+        r"six[- ]?digit code", r"ओटीपी", r"वन टाइम पासवर्ड", r"वेरिफिकेशन कोड",
+        r"otp.*bata", r"otp.*batao", r"otp.*bhej", r"code.*batao", r"code.*bhejo",
+    ],
+    "UPI PIN": [
+        r"\bupi\s*pin\b", r"upi.*pin", r"pin.*upi", r"यूपीआई.*पिन",
+        r"upi pin.*bata", r"pin.*batao", r"pin.*bhejo",
+    ],
     "Password / Login": [
         r"\b(password|passcode)\b.*\b(give|tell|share|send|read|provide|forward|confirm|type|enter)\b",
         r"\b(give|tell|share|send|read|provide|forward)\b.*\b(password|passcode)\b",
         r"\b(net banking|login credentials)\b",
         r"\b(password|passcode)\b.*\b(chahiye|batao|bataiye|de do|bhejo|share karo)\b",
         r"\b(chahiye|batao|bataiye|de do|bhejo|share karo)\b.*\b(password|passcode)\b",
+        r"पासवर्ड.*(बताओ|बताइए|भेजो|चाहिए)", r"पासवर्ड.*दो",
     ],
-    "Card / CVV": [r"\bcvv\b", r"card number", r"debit card", r"credit card", r"expiry date"],
-    "Money Transfer": [r"transfer", r"send the money", r"make the payment", r"wire the amount", r"upi transfer", r"bank account"],
-    "Personal Information": [r"aadhaar", r"pan card", r"date of birth", r"address", r"mother.?s maiden", r"personal (details|information)"],
-    "Sensitive Data": [r"employee database", r"customer records", r"confidential files", r"salary sheet", r"kyc documents", r"internal audit"],
-    "Remote Access": [r"anydesk", r"teamviewer", r"remote access", r"screen share", r"install.*app", r"remote desktop", r"rustdesk"],
-    "Suspicious Link": [r"click (this|the) link", r"open (this|the) link", r"link.*verify", r"shortened link", r"bit\.ly", r"tinyurl"],
+    "Card / CVV": [
+        r"\bcvv\b", r"card number", r"debit card", r"credit card", r"expiry date",
+        r"सीवीवी", r"कार्ड नंबर", r"डेबिट कार्ड", r"क्रेडिट कार्ड",
+    ],
+    "Money Transfer": [
+        r"transfer", r"send the money", r"make the payment", r"wire the amount", r"upi transfer", r"bank account",
+        r"पैसे.*(भेज|ट्रांसफर|जमा)", r"रकम.*(भेज|ट्रांसफर)", r"payment.*(करो|करना)",
+        r"paise.*(bhej|transfer|jama)", r"paisa.*(bhej|transfer)", r"payment.*karo",
+    ],
+    "Personal Information": [
+        r"aadhaar", r"pan card", r"date of birth", r"address", r"mother.?s maiden", r"personal (details|information)",
+        r"आधार", r"पैन कार्ड", r"जन्म तारीख", r"जन्म तिथि", r"पता", r"personal details",
+    ],
+    "Sensitive Data": [
+        r"employee database", r"customer records", r"confidential files", r"salary sheet", r"kyc documents", r"internal audit",
+        r"kyc.*(document|details)", r"केवाईसी", r"गोपनीय",
+    ],
+    "Remote Access": [
+        r"anydesk", r"teamviewer", r"remote access", r"screen share", r"install.*app", r"remote desktop", r"rustdesk",
+        r"anydesk.*install", r"teamviewer.*install", r"screen.*share", r"स्क्रीन शेयर",
+    ],
+    "Suspicious Link": [
+        r"click (this|the) link", r"open (this|the) link", r"link.*verify", r"shortened link", r"bit\.ly", r"tinyurl",
+        r"link.*open", r"लिंक.*खोल", r"लिंक.*क्लिक",
+    ],
 }
-
-# Hindi/Hinglish patterns commonly produced by multilingual ASR. These are
-# additive signals, not standalone fraud verdicts.
-REQUEST_INTELLIGENCE_PATTERNS.update({
-    "OTP / Verification Code": REQUEST_INTELLIGENCE_PATTERNS["OTP / Verification Code"] + [
-        r"ओ\s*टी\s*पी", r"वन\s*टाइम\s*पासवर्ड", r"वेरिफिकेशन\s*कोड", r"सिक्योरिटी\s*कोड",
-    ],
-    "UPI PIN": REQUEST_INTELLIGENCE_PATTERNS["UPI PIN"] + [
-        r"यूपीआई\s*पिन", r"upi\s*pin",
-    ],
-    "Password / Login": REQUEST_INTELLIGENCE_PATTERNS["Password / Login"] + [
-        r"पासवर्ड\s*(बताओ|बताइए|बता दो|दे दो|भेजो|शेयर करो|चाहिए)",
-        r"(बताओ|बताइए|बता दो|दे दो|भेजो|शेयर करो)\s*(अपना\s*)?पासवर्ड",
-        r"पासकोड|लॉग\s*इन\s*क्रेडेंशियल",
-    ],
-    "Card / CVV": REQUEST_INTELLIGENCE_PATTERNS["Card / CVV"] + [
-        r"सीवीवी", r"कार्ड\s*(नंबर|डिटेल|डिटेल्स)",
-    ],
-    "Money Transfer": REQUEST_INTELLIGENCE_PATTERNS["Money Transfer"] + [
-        r"पैसे\s*(भेजो|भेजिए|ट्रांसफर|दे दो)", r"पेमेंट\s*(करो|करिए|भेजो)",
-        r"रकम\s*(भेजो|ट्रांसफर करो)",
-    ],
-    "Personal Information": REQUEST_INTELLIGENCE_PATTERNS["Personal Information"] + [
-        r"आधार", r"पैन\s*कार्ड", r"जन्म\s*तिथि", r"पता\s*(बताओ|भेजो|चाहिए)",
-    ],
-    "Remote Access": REQUEST_INTELLIGENCE_PATTERNS["Remote Access"] + [
-        r"स्क्रीन\s*शेयर", r"रिमोट\s*एक्सेस", r"एनीडेस्क", r"टीमव्यूअर",
-    ],
-    "Suspicious Link": REQUEST_INTELLIGENCE_PATTERNS["Suspicious Link"] + [
-        r"लिंक\s*(पर|पे)\s*(क्लिक|करो)", r"लिंक\s*खोलो",
-    ],
-})
 
 SOCIAL_ENGINEERING_PATTERNS = {
-    "Authority impersonation": [r"bank security", r"police", r"income tax", r"government", r"cyber cell", r"fraud team", r"security department", r"manager", r"boss"],
-    "Urgency pressure": [r"immediately", r"right now", r"urgent", r"hurry", r"quickly", r"within \d+ (minutes?|hours?)", r"today itself"],
-    "Threat / fear": [r"account.*(block|freeze|suspend|close)", r"legal action", r"arrest", r"penalty", r"police case", r"you will lose", r"otherwise"],
-    "Secrecy / isolation": [r"do not tell", r"don't tell", r"keep this secret", r"between us", r"do not disconnect", r"don't hang up", r"stay on the line"],
-    "Verification bypass": [r"no need to verify", r"skip verification", r"trust me", r"don't call back", r"no need to check"],
-    "Artificial deadline": [r"last chance", r"final warning", r"expires today", r"within 10 minutes", r"before evening"],
+    "Authority impersonation": [
+        r"bank security", r"police", r"income tax", r"government", r"cyber cell", r"fraud team", r"security department", r"manager", r"boss",
+        r"बैंक से बोल", r"बैंक अधिकारी", r"पुलिस अधिकारी", r"सरकारी अधिकारी", r"साइबर क्राइम", r"कस्टमर केयर",
+        r"bank se bol", r"bank officer", r"police officer", r"customer care",
+    ],
+    "Urgency pressure": [
+        r"immediately", r"right now", r"urgent", r"hurry", r"quickly", r"within \d+ (minutes?|hours?)", r"today itself",
+        r"अभी तुरंत", r"तुरंत", r"जल्दी", r"अभी करना", r"आज ही", r"abhi turant", r"jaldi", r"abhi kar",
+    ],
+    "Threat / fear": [
+        r"account.*(block|freeze|suspend|close)", r"legal action", r"arrest", r"penalty", r"police case", r"you will lose", r"otherwise",
+        r"अकाउंट.*(ब्लॉक|बंद|फ्रीज|सस्पेंड)", r"कानूनी कार्रवाई", r"गिरफ्तार", r"जुर्माना", r"केस हो जाएगा", r"account block ho", r"account band ho",
+    ],
+    "Secrecy / isolation": [
+        r"do not tell", r"don't tell", r"keep this secret", r"between us", r"do not disconnect", r"don't hang up", r"stay on the line",
+        r"किसी को मत बताना", r"किसी को नहीं बताना", r"गुप्त रखना", r"फोन मत काटना", r"लाइन पर रहना",
+        r"kisi ko mat batana", r"secret rakhna", r"phone mat katna",
+    ],
+    "Verification bypass": [
+        r"no need to verify", r"skip verification", r"trust me", r"don't call back", r"no need to check",
+        r"वेरिफाई करने की जरूरत नहीं", r"जांच की जरूरत नहीं", r"मुझ पर भरोसा करो", r"वापस कॉल मत करना",
+        r"verify ki zarurat nahi", r"trust me", r"call back mat",
+    ],
+    "Artificial deadline": [
+        r"last chance", r"final warning", r"expires today", r"within 10 minutes", r"before evening",
+        r"आखिरी मौका", r"अंतिम चेतावनी", r"आज खत्म", r"दस मिनट", r"शाम से पहले", r"last chance", r"final warning",
+    ],
 }
 
-SOCIAL_ENGINEERING_PATTERNS.update({
-    "Authority impersonation": SOCIAL_ENGINEERING_PATTERNS["Authority impersonation"] + [
-        r"बैंक\s*(से|की)\s*(सिक्योरिटी|सुरक्षा)", r"बैंक\s*से\s*बोल",
-        r"पुलिस\s*से\s*बोल", r"साइबर\s*सेल", r"इनकम\s*टैक्स", r"सरकारी\s*विभाग",
-    ],
-    "Urgency pressure": SOCIAL_ENGINEERING_PATTERNS["Urgency pressure"] + [
-        r"अभी", r"तुरंत", r"जल्दी", r"फौरन", r"इसी\s*वक्त", r"आज\s*ही",
-    ],
-    "Threat / fear": SOCIAL_ENGINEERING_PATTERNS["Threat / fear"] + [
-        r"खाता\s*(बंद|ब्लॉक|फ्रीज|जाम)", r"कानूनी\s*कार्रवाई", r"पुलिस\s*केस", r"जुर्माना",
-    ],
-    "Secrecy / isolation": SOCIAL_ENGINEERING_PATTERNS["Secrecy / isolation"] + [
-        r"किसी\s*(को|से)\s*मत\s*(बताओ|बताना|कहना)", r"किसी\s*को\s*मत\s*बताना",
-        r"फोन\s*मत\s*काटना", r"कॉल\s*मत\s*काटना",
-    ],
-    "Verification bypass": SOCIAL_ENGINEERING_PATTERNS["Verification bypass"] + [
-        r"वेरिफाई\s*करने\s*की\s*जरूरत\s*नहीं", r"चेक\s*करने\s*की\s*जरूरत\s*नहीं",
-        r"मुझपर\s*भरोसा\s*करो",
-    ],
-    "Artificial deadline": SOCIAL_ENGINEERING_PATTERNS["Artificial deadline"] + [
-        r"आखिरी\s*मौका", r"आज\s*तक", r"अभी\s*नहीं\s*तो",
-    ],
-})
 
 def _pattern_hits(text: str, groups: dict):
     clean = _clean_text(text)
@@ -422,38 +405,14 @@ def _pattern_hits(text: str, groups: dict):
 
 
 def analyze_request_intelligence(text: str):
-    clean = _clean_text(text)
-    hits = _pattern_hits(clean, REQUEST_INTELLIGENCE_PATTERNS)
-
-    # Mentioning a credential is not the same as requesting it. This prevents
-    # lines such as "never share your OTP" or "I forgot my password" from
-    # becoming a credential-extraction event.
-    request_words = bool(re.search(
-        r"\b(give|tell|share|send|read|provide|forward|confirm|type|enter|show|" +
-        r"बताओ|बताइए|बता दो|दे दो|भेजो|शेयर|चाहिए|दिखाओ|डालो)\b",
-        clean, flags=re.IGNORECASE
-    ))
-    negated = bool(re.search(
-        r"(do not|don't|never|not share|मत बताओ|मत देना|किसी को मत|शेयर मत|न देना)",
-        clean, flags=re.IGNORECASE
-    ))
-
-    # High-severity credential phrases remain strong even when ASR omitted a
-    # classic English request verb, but explicit negation cancels that signal.
-    high_cred = any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Remote Access"])
-    if not request_words and not high_cred:
-        hits = [x for x in hits if x not in {"Password / Login", "Card / CVV", "Personal Information"}]
-    if negated:
-        hits = []
-
+    hits = _pattern_hits(text, REQUEST_INTELLIGENCE_PATTERNS)
     primary = hits[0] if hits else "No sensitive request detected"
-    critical = {"OTP / Verification Code", "UPI PIN", "Remote Access"}
     return {
         "primary_request": primary,
         "requests": hits,
         "request_count": len(hits),
         "sensitive": bool(hits),
-        "highest_severity": "CRITICAL" if any(x in hits for x in critical) else ("HIGH" if hits else "LOW"),
+        "highest_severity": "CRITICAL" if any(x in hits for x in ["OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"]) else ("HIGH" if hits else "LOW"),
     }
 
 
@@ -470,13 +429,7 @@ def analyze_social_engineering(text: str):
 
 
 def conversation_firewall_score(factors: dict, text: str, previous_score=None):
-    """Fuse voice, identity and conversation evidence into a 0-100 TRUST score.
-
-    100 = low concern / high trust. 0 = critical risk.
-    A synthetic-voice result by itself is not treated as fraud. The score
-    escalates strongly when spoof evidence co-occurs with credential, payment,
-    remote-access or social-engineering requests.
-    """
+    """Fuse voice, identity and conversation evidence into a 0-100 trust score."""
     request = analyze_request_intelligence(text)
     social = analyze_social_engineering(text)
     fused, caps = fuse_with_gates(factors)
@@ -497,57 +450,22 @@ def conversation_firewall_score(factors: dict, text: str, previous_score=None):
         risk_components["Context"] * 0.15
     )
 
-    # Explicit conversation evidence adds risk, but only when it is actually
-    # present. This prevents a single word such as "password" from deciding
-    # the whole call.
     extra = 0.0
     if request["requests"]:
-        extra += min(18, request["request_count"] * 6)
-    if social["count"] >= 1:
-        extra += 6
+        extra += min(12, request["request_count"] * 4)
     if social["count"] >= 2:
         extra += 8
     if social["count"] >= 4:
         extra += 8
-
-    critical_request = request["primary_request"] in {
-        "OTP / Verification Code", "UPI PIN", "Remote Access"
-    } or (
-        request["primary_request"] == "Password / Login"
-        and social["count"] >= 1
-    )
-    financial_request = request["primary_request"] in {
-        "Money Transfer", "Card / CVV"
-    }
-    voice_spoof = float(factors.get("Voice Authenticity", 94)) < 30
-
-    if critical_request:
-        extra += 12
-    elif financial_request:
+    if request["primary_request"] in {"OTP / Verification Code", "UPI PIN", "Password / Login", "Remote Access"}:
         extra += 8
 
-    # Trajectory escalation is only used when a prior analyzed state exists.
+    # Escalation is based on a worsening trajectory, not a fake fixed score.
     if previous_score is not None and weighted_risk > (100 - float(previous_score)) + 8:
         extra += 5
 
-    risk = min(100.0, weighted_risk + extra)
+    risk = min(100, max(float(weighted_risk), weighted_risk + extra))
     trust = int(round(100 - risk))
-
-    # Strong combined evidence gets an explicit intervention cap. This is the
-    # key distinction: spoof + dangerous request is much stronger than spoof
-    # alone. A real voice making the same dangerous request can also escalate.
-    if critical_request and voice_spoof and trust > 25:
-        trust = 25
-        caps.append("Synthetic-voice evidence combined with a credential/remote-access request")
-    elif financial_request and voice_spoof and trust > 35:
-        trust = 35
-        caps.append("Synthetic-voice evidence combined with a financial request")
-    elif critical_request and social["count"] >= 2 and trust > 30:
-        trust = 30
-        caps.append("Credential request combined with multiple social-engineering indicators")
-    elif voice_spoof and trust > 60:
-        trust = 60
-        caps.append("Strong synthetic-voice evidence; verify the caller before sensitive action")
 
     if trust >= 75:
         level, action = "LOW", "CONTINUE / MONITOR"
@@ -558,13 +476,16 @@ def conversation_firewall_score(factors: dict, text: str, previous_score=None):
     else:
         level, action = "CRITICAL", "STOP / BLOCK REQUEST"
 
+    if caps:
+        trust = min(trust, int(fused))
+
     breakdown = {
         "weighted_risk": round(weighted_risk, 1),
         "additional_risk": round(extra, 1),
         "risk_components": risk_components,
         "request_intelligence": request,
         "social_engineering": social,
-        "caps": list(dict.fromkeys(caps)),
+        "caps": caps,
         "trust_score": int(max(0, min(100, trust))),
         "risk_level": level,
         "action": action,
@@ -734,13 +655,6 @@ CONTEXT_CUES = [
     (r"\b(remote (access|desktop)|anydesk|teamviewer|screen share)\b", 32, "Remote control requested"),
 ]
 
-BENIGN_CONTEXT_PATTERNS = [
-    (r"\b(lic|insurance|policy|premium|policy number|claim|renewal|form|application|documentation|document|submission)\b", "Legitimate service/form context"),
-    (r"\b(friend|classmate|colleague|team|project|assignment|college|office work)\b", "Familiar/work context"),
-    (r"\b(official (website|branch|office)|visit the (official )?branch)\b", "Official verification path"),
-    (r"(एलआईसी|बीमा|पॉलिसी|प्रीमियम|फॉर्म|आवेदन|दस्तावेज|दोस्त|क्लासमेट|प्रोजेक्ट|कॉलेज)", "Legitimate Hindi/Hinglish context"),
-]
-
 CREDENTIAL_PATTERNS = [
     (r"\b(otp|o\.?t\.?p\.?|one[- ]time password)\b", "OTP"),
     (r"\b(cvv|cvc)\b", "CVV"),
@@ -862,18 +776,10 @@ def analyse_conversation(text: str):
     conf = float(intent.get("confidence", 0.0)) / 100.0
     intent_safety = 95 - (95 - floor) * conf
 
-    # A credential word is evidence, not a verdict. Require request language or
-    # a high-severity credential such as OTP/UPI PIN before applying a strong
-    # intent penalty. This avoids flagging benign conversations that mention
-    # a password while still escalating explicit credential extraction.
-    credential_terms = set(intent.get("credential_terms") or [])
-    request_language = bool(re.search(
-        r"\b(give|tell|share|send|read|provide|forward|confirm|enter|type|" +
-        r"बताओ|बताना|भेजो|बताइए|दे दो|शेयर|चाहिए)\b", clean, flags=re.IGNORECASE
-    ))
-    high_severity_credential = bool(credential_terms & {"OTP", "CVV", "PIN", "Verification code"})
-    if credential_terms and (request_language or high_severity_credential):
-        intent_safety = min(intent_safety, 28 if high_severity_credential else 45)
+    # An explicit credential term is a hard signal regardless of classifier
+    # confidence: no legitimate caller needs a live OTP read back to them.
+    if intent.get("credential_terms"):
+        intent_safety = min(intent_safety, 15)
 
     behavior_safety, context_safety = 94.0, 94.0
     reasons = []
@@ -895,14 +801,6 @@ def analyse_conversation(text: str):
         extra = 8 * (len(reasons) - 2)
         behavior_safety -= extra
         context_safety -= extra
-
-    benign_context = [label for pattern, label in BENIGN_CONTEXT_PATTERNS
-                      if re.search(pattern, clean, flags=re.IGNORECASE)]
-    # Benign context is only a soft mitigating signal. It never overrides an
-    # OTP/UPI/remote-access request or social-engineering evidence.
-    if benign_context and not reasons:
-        context_safety = min(98.0, context_safety + 3.0)
-        reasons.append(benign_context[0])
 
     return {
         "intent_prediction": intent,
@@ -1442,7 +1340,7 @@ def cached_audio_scores(raw: bytes, filename: str, model_key: str):
 
     analysis_raw, analysis_suffix = raw, original_suffix
 
-    if original_suffix != ".wav":
+    if original_suffix in {".mp4", ".webm", ".mov", ".mkv", ".avi"}:
         try:
             import imageio_ffmpeg
             ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -1537,25 +1435,23 @@ def apply_antispoof_to_trust(result: dict, source_label: str):
         return
 
     st.session_state.factors["Voice Authenticity"] = int(
-        round(float(anti.get("bona_fide_probability", 0.0) or 0.0))
+        round(float(anti["bona_fide_probability"]))
     )
     verdict = str(anti.get("verdict", ""))
     fused, caps = fuse_with_gates(st.session_state.factors)
 
+    # AASIST is evidence about the audio signal, not a fraud verdict.
+    # Do not turn a spoof prediction into CRITICAL before conversation analysis.
+    st.session_state.score = fused
     if verdict == "LIKELY SYNTHETIC / SPOOF":
-        # Do not call a spoofed voice a fraud call before the transcript is
-        # analyzed. This is only a voice-authenticity warning at this stage.
-        st.session_state.score = min(fused, 60)
-        st.session_state.scenario = "Potential Voice Spoof"
+        st.session_state.scenario = "Voice Authenticity Requires Verification"
         st.session_state.action_status = "VERIFY CALLER"
     elif verdict == "LIKELY AUTHENTIC":
-        st.session_state.score = fused
         st.session_state.scenario = "Voice Appears Authentic"
-        st.session_state.action_status = "Monitoring"
+        st.session_state.action_status = "CONTINUE / MONITOR"
     else:
-        st.session_state.score = min(fused, 70)
         st.session_state.scenario = "Uncertain Voice Signal"
-        st.session_state.action_status = "Review audio / verify independently"
+        st.session_state.action_status = "VERIFY CALLER"
         caps.append(verdict.replace("INCONCLUSIVE / ", "Inconclusive: ").title())
 
     st.session_state.risk_explanation = caps
@@ -1579,7 +1475,6 @@ def apply_antispoof_to_trust(result: dict, source_label: str):
 # ============================================================
 
 _WHISPER_MODEL = None
-WHISPER_MODEL_NAME = os.getenv("TRUSTVOICE_WHISPER_MODEL", "small")
 
 
 def _get_whisper_model():
@@ -1587,56 +1482,50 @@ def _get_whisper_model():
     if WhisperModel is None:
         raise RuntimeError("faster-whisper is not installed. Run: pip install faster-whisper")
     if _WHISPER_MODEL is None:
-        try:
-            _WHISPER_MODEL = WhisperModel(
-                WHISPER_MODEL_NAME,
-                device="cpu",
-                compute_type="int8",
-                cpu_threads=max(2, min(8, os.cpu_count() or 4)),
-                num_workers=1,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Could not load faster-whisper model '{WHISPER_MODEL_NAME}'. "
-                "Check model availability and available RAM."
-            ) from exc
+        _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
     return _WHISPER_MODEL
 
 
 def _canonical_audio_for_asr(raw: bytes, filename: str):
-    """Decode any common audio/video container to mono 16 kHz PCM WAV via FFmpeg.
-
-    This keeps the rest of the pipeline format-agnostic. FFmpeg is supplied by
-    imageio-ffmpeg, so the Streamlit deployment does not depend on a system
-    ffmpeg executable being installed separately.
-    """
-    suffix = Path(filename).suffix.lower() or ".bin"
+    suffix = Path(filename).suffix.lower() or ".wav"
+    video_suffixes = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
     tmpdir = tempfile.TemporaryDirectory()
     work = Path(tmpdir.name)
     source = work / f"input{suffix}"
     source.write_bytes(raw)
     wav = work / "audio_16k.wav"
 
-    try:
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except ImportError as exc:
-        tmpdir.cleanup()
-        raise RuntimeError("Universal audio decoding requires imageio-ffmpeg.") from exc
+    if suffix in video_suffixes:
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError as exc:
+            tmpdir.cleanup()
+            raise RuntimeError("Video transcription requires imageio-ffmpeg.") from exc
 
-    proc = subprocess.run(
-        [
-            ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(source),
-            "-vn", "-ac", "1", "-ar", "16000",
-            "-c:a", "pcm_s16le", str(wav),
-        ],
-        capture_output=True, text=True, timeout=180,
-    )
-    if proc.returncode != 0 or not wav.exists() or wav.stat().st_size == 0:
-        err = proc.stderr.strip()[-900:] or "Unsupported format, invalid file, or no audio stream found."
-        tmpdir.cleanup()
-        raise RuntimeError(f"Audio decoding failed: {err}")
+        proc = subprocess.run(
+            [ffmpeg_exe, "-y", "-i", str(source), "-vn", "-ac", "1",
+             "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
+            capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0 or not wav.exists():
+            err = proc.stderr.strip()[-700:] or "No audio track found."
+            tmpdir.cleanup()
+            raise RuntimeError(f"Audio extraction failed: {err}")
+    else:
+        if librosa is None:
+            tmpdir.cleanup()
+            raise RuntimeError("librosa is required for audio canonicalization.")
+        try:
+            import soundfile as sf
+            y, _ = librosa.load(io.BytesIO(raw), sr=16000, mono=True)
+            y = np.asarray(y, dtype=np.float32)
+            if y.size == 0:
+                raise ValueError("No audio samples found.")
+            sf.write(str(wav), y, 16000, subtype="PCM_16")
+        except Exception:
+            tmpdir.cleanup()
+            raise
 
     return tmpdir, wav
 
@@ -1648,17 +1537,8 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
         segments, info = model.transcribe(
             str(wav_path),
             beam_size=5,
-            best_of=5,
-            patience=1.0,
-            temperature=0.0,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=350, speech_pad_ms=250),
             condition_on_previous_text=True,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.5,
-            language=None,
-            task="transcribe",
         )
         rows = []
         parts = []
@@ -1680,7 +1560,7 @@ def transcribe_audio_bytes(raw: bytes, filename: str) -> dict:
             "segments": rows,
             "language": getattr(info, "language", None),
             "language_probability": round(float(getattr(info, "language_probability", 0.0) or 0.0), 4),
-            "model": f"faster-whisper {WHISPER_MODEL_NAME} / CPU int8 · Hindi + English + Hinglish",
+            "model": "faster-whisper base / CPU int8",
         }
     finally:
         tmpdir.cleanup()
@@ -1700,10 +1580,9 @@ def _apply_transcript_analysis(transcript: str):
     spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
     similarity = float((st.session_state.get("speaker_match") or {}).get("similarity", 0.0) or 0.0)
 
-    if spoof >= 70:
-        st.session_state.factors["Voice Authenticity"] = min(
-            st.session_state.factors.get("Voice Authenticity", 94), 25
-        )
+    # Keep the actual AASIST-derived voice factor. A spoof signal is only one
+    # evidence channel; conversation evidence decides whether the interaction
+    # is actually dangerous.
     if similarity >= 80:
         st.session_state.factors["Speaker Identity"] = min(
             st.session_state.factors.get("Speaker Identity", 94), 45
@@ -1711,7 +1590,8 @@ def _apply_transcript_analysis(transcript: str):
 
     result = apply_conversation_firewall(transcript.strip(), previous_score)
 
-    if spoof >= 70 and similarity >= 80 and st.session_state.score <= 30:
+    if spoof >= 70 and similarity >= 80:
+        st.session_state.score = min(st.session_state.score, 15)
         st.session_state.scenario = "Potential Voice-Cloning Impersonation"
         st.session_state.action_status = "STOP / BLOCK REQUEST · TRUST HANDSHAKE REQUIRED"
         st.session_state.risk_explanation.extend([
@@ -1729,21 +1609,6 @@ def _apply_transcript_analysis(transcript: str):
     st.session_state.risk_explanation = list(dict.fromkeys(st.session_state.risk_explanation))
     st.session_state.analysis_done = True
     return analysis
-
-
-def voice_authenticity_label(anti: dict | None) -> tuple[str, str]:
-    """Return a user-facing real-vs-AI label from the anti-spoof verdict.
-
-    Never invent a verdict when the quality gate/model is inconclusive.
-    """
-    if not anti:
-        return "UNAVAILABLE", "No anti-spoof model result."
-    verdict = str(anti.get("verdict", ""))
-    if verdict == "LIKELY SYNTHETIC / SPOOF":
-        return "LIKELY AI-GENERATED", "Countermeasure evidence indicates synthetic/spoofed speech."
-    if verdict == "LIKELY AUTHENTIC":
-        return "LIKELY REAL / AUTHENTIC", "Countermeasure evidence is consistent with bona-fide speech."
-    return "INCONCLUSIVE", verdict.replace("INCONCLUSIVE / ", "") or "Insufficient evidence for a reliable real-vs-AI decision."
 
 
 def analyze_audio_end_to_end(raw: bytes, filename: str, source_label: str = "Audio"):
@@ -1797,12 +1662,14 @@ def apply_p3_speaker_signal(raw: bytes, filename: str):
             f"Moderate similarity to registered speaker: {result.get('speaker')} ({similarity:.1f}%)."
         )
     if spoof >= 70 and similarity >= 80:
-        # Speaker similarity + spoof is evidence of possible cloning, not proof
-        # of fraud. Let the conversation firewall make the final decision.
+        st.session_state.score = min(int(st.session_state.score), 15)
+        st.session_state.scenario = "Potential Voice-Cloning Impersonation"
+        st.session_state.action_status = "Trust Handshake required · Sensitive action restricted"
         st.session_state.risk_explanation.extend([
             "AI-generated / spoofed voice detected.",
             "High registered-speaker similarity detected.",
-            "Possible voice-cloning impersonation signal; conversation context required.",
+            "Voice authenticity and speaker identity signals conflict.",
+            "Potential voice-cloning impersonation attack.",
         ])
 
 
@@ -1931,7 +1798,7 @@ def build_incident_report():
     """)
     home_audio = st.file_uploader(
         "Upload audio/video for complete analysis",
-        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
         key="home_complete_audio",
     )
     if home_audio is not None:
@@ -2558,8 +2425,8 @@ if nav == "Dashboard":
 
     with c2:
         if anti:
-            spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
-            bona = float(anti.get("bona_fide_probability", 0.0) or 0.0)
+            spoof = float(anti["spoof_probability"])
+            bona = float(anti["bona_fide_probability"])
             render(f"""
             <div class="card">
               <div class="card-head"><div class="card-title">Voice Authenticity · Countermeasure</div><div class="card-kicker">PRETRAINED</div></div>
@@ -2850,8 +2717,8 @@ elif nav == "Live Analysis":
         <div class="card" style="margin-top:12px">
           <div class="card-title">LIVE VOICE RESULT</div>
           <div class="metric-row"><span>Verdict</span><span>{escape(str(anti["verdict"]))}</span></div>
-          <div class="metric-row"><span>Bona-fide model score</span><span>{float(anti.get("bona_fide_probability", 0.0) or 0.0):.1f}%</span></div>
-          <div class="metric-row"><span>Spoof model score</span><span>{float(anti.get("spoof_probability", 0.0) or 0.0):.1f}%</span></div>
+          <div class="metric-row"><span>Bona-fide model score</span><span>{float(anti["bona_fide_probability"]):.1f}%</span></div>
+          <div class="metric-row"><span>Spoof model score</span><span>{float(anti["spoof_probability"]):.1f}%</span></div>
           <div class="metric-row"><span>Countermeasure score (logit)</span><span>{anti.get("cm_score","—")}</span></div>
           <div class="metric-row"><span>Deterministic windows</span><span>{anti.get("windows_used",1)} (silent dropped: {anti.get("windows_dropped_silent",0)})</span></div>
           <div class="metric-row"><span>Window spread</span><span>{anti.get("confidence_spread",0):.3f}%</span></div>
@@ -2932,7 +2799,7 @@ elif nav == "Audio Forensics":
 
     uploaded = st.file_uploader(
         "Drop an audio or video sample here",
-        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
         key="cyber_gold_upload",
     )
     if uploaded:
@@ -2944,33 +2811,32 @@ elif nav == "Audio Forensics":
             st.audio(raw)
 
         transcript_text = st.text_area(
-            "Optional: paste the call transcript for intent, behavior and context scoring",
+            "Optional transcript override · leave blank for automatic transcription",
             value="",
             height=90,
             key="forensics_transcript",
-            help="Without a transcript only the voice-authenticity factor is evidence-based; the rest stay neutral.",
+            help="Leave blank and TrustVoice will automatically transcribe the recording before intent, behavior and context scoring.",
         )
 
         if st.button("◉ Run Real Voice Trust Analysis", use_container_width=True):
-            with st.spinner("Extracting audio · loading model · running anti-spoof inference..."):
+            with st.spinner("Extracting audio · running anti-spoof · transcribing conversation..."):
                 result = safe_audio_analysis(raw, uploaded.name)
 
             apply_antispoof_to_trust(result, f"Audio · {uploaded.name}")
             apply_p3_speaker_signal(raw, uploaded.name)
 
-            # Audio Forensics now uses the same automatic STT + conversation firewall
-            # pipeline as Audio & Transcript Analysis. Manual text remains an optional
-            # override, so the UI stays unchanged while the analysis becomes complete.
+            # Manual transcript overrides ASR. Otherwise transcribe automatically.
             final_transcript = transcript_text.strip()
             transcript_meta = {}
+
             if not final_transcript:
                 try:
-                    auto_transcript = transcribe_audio_bytes(raw, uploaded.name)
-                    final_transcript = str(auto_transcript.get("text", "") or "").strip()
-                    transcript_meta = auto_transcript
-                    st.session_state.transcript_segments = auto_transcript.get("segments", [])
-                    st.session_state.transcript_language = auto_transcript.get("language")
-                    st.session_state.transcript_source = auto_transcript.get("model")
+                    auto = transcribe_audio_bytes(raw, uploaded.name)
+                    final_transcript = str(auto.get("text", "") or "").strip()
+                    transcript_meta = auto
+                    st.session_state.transcript_segments = auto.get("segments", [])
+                    st.session_state.transcript_language = auto.get("language")
+                    st.session_state.transcript_source = auto.get("model")
                 except Exception as exc:
                     st.session_state.transcript = ""
                     st.session_state.transcript_source = None
@@ -2979,7 +2845,86 @@ elif nav == "Audio Forensics":
                     )
 
             if final_transcript:
+                # Existing conversation firewall analysis.
                 text_analysis = _apply_transcript_analysis(final_transcript)
+
+                # Claude's deterministic risk engine is now actually used in the
+                # live audio path. Its score is an additional explainable safety
+                # signal, never a replacement for the existing fusion.
+                dedicated_score = None
+                if DedicatedRiskEngine is not None:
+                    try:
+                        anti = result.get("anti_spoof") or {}
+                        voice_state = (
+                            "SUSPICIOUS"
+                            if str(anti.get("verdict", "")) == "LIKELY SYNTHETIC / SPOOF"
+                            else "REAL"
+                        )
+                        identity_state = "VERIFIED" if (st.session_state.get("speaker_match") or {}).get("verified") else "UNVERIFIED"
+                        dedicated = DedicatedRiskEngine().evaluate(
+                            final_transcript,
+                            voice_authenticity=voice_state,
+                            identity=identity_state,
+                            previous_score=st.session_state.get("score"),
+                        )
+                        dedicated_score = int(dedicated.get("score", 100))
+                        st.session_state.fusion_breakdown["dedicated_risk_engine"] = dedicated
+                        st.session_state.risk_explanation.extend(dedicated.get("signals", []))
+                    except Exception as exc:
+                        st.session_state.risk_explanation.append(
+                            f"Dedicated risk engine unavailable: {type(exc).__name__}"
+                        )
+
+                dedicated_requests = []
+                dedicated_behaviour = ""
+                dedicated_signals = []
+                has_interaction_evidence = False
+
+                if dedicated_score is not None:
+                    dedicated_requests = dedicated.get("requests") or []
+                    dedicated_behaviour = str(dedicated.get("behaviour", ""))
+                    dedicated_signals = dedicated.get("signals") or []
+                    has_interaction_evidence = bool(dedicated_requests) or (
+                        dedicated_behaviour and
+                        dedicated_behaviour != "No major pressure indicators"
+                    )
+
+                    # The dedicated deterministic engine is a strong secondary
+                    # signal only when it found an actual request/behaviour cue.
+                    # Its synthetic-voice-only penalty must not turn a benign
+                    # conversation into a fraud verdict.
+                    if has_interaction_evidence:
+                        st.session_state.score = min(
+                            int(st.session_state.score),
+                            dedicated_score,
+                        )
+                        st.session_state.risk_explanation.extend(dedicated_signals)
+
+                # FINAL VOICE-ONLY POLICY:
+                # spoof + no dangerous interaction => VERIFY, never CRITICAL.
+                anti_final = result.get("anti_spoof") or {}
+                spoof_final = float(anti_final.get("spoof_probability", 0.0) or 0.0)
+                interaction = bool(
+                    st.session_state.get("request_intelligence", {}).get("requests")
+                    or st.session_state.get("social_engineering", {}).get("signals")
+                    or has_interaction_evidence
+                )
+                if spoof_final >= 70 and not interaction:
+                    st.session_state.score = min(max(int(st.session_state.score), 50), 74)
+                    st.session_state.scenario = "Voice Authenticity Requires Verification"
+                    st.session_state.action_status = "VERIFY CALLER"
+                    st.session_state.risk_explanation = list(dict.fromkeys(
+                        list(st.session_state.risk_explanation)
+                        + ["Strong synthetic-voice evidence; no dangerous request detected",
+                           "Verify caller before any sensitive action"]
+                    ))
+                elif interaction:
+                    # Any genuine interaction evidence is allowed to drive the
+                    # score below the voice-only review ceiling.
+                    if st.session_state.score < 50:
+                        st.session_state.scenario = "High-Risk / Dangerous Request"
+                        st.session_state.action_status = "HOLD SENSITIVE ACTION" if st.session_state.score >= 20 else "STOP / BLOCK REQUEST"
+
                 st.session_state.last_analysis["transcript"] = final_transcript
                 st.session_state.last_analysis["transcript_meta"] = {
                     "language": transcript_meta.get("language", st.session_state.get("transcript_language")),
@@ -2987,9 +2932,7 @@ elif nav == "Audio Forensics":
                     "model": transcript_meta.get("model", st.session_state.get("transcript_source")),
                     "segments": transcript_meta.get("segments", st.session_state.get("transcript_segments", [])),
                 }
-                st.session_state.risk_explanation = list(dict.fromkeys(
-                    st.session_state.risk_explanation + text_analysis.get("reasons", [])
-                ))
+                st.session_state.risk_explanation = list(dict.fromkeys(st.session_state.risk_explanation))
             else:
                 st.session_state.scenario = "Voice Signal Only"
                 st.session_state.action_status = "VERIFY CALLER"
@@ -3016,8 +2959,8 @@ elif nav == "Audio Forensics":
             """)
         with y:
             if anti:
-                spoof = float(anti.get("spoof_probability", 0.0) or 0.0)
-                bona = float(anti.get("bona_fide_probability", 0.0) or 0.0)
+                spoof = float(anti["spoof_probability"])
+                bona = float(anti["bona_fide_probability"])
                 render(f"""
                 <div class="card">
                   <div class="card-title">Anti-Spoof Countermeasure</div>
@@ -3116,7 +3059,7 @@ elif nav == "Audio & Transcript Analysis":
     )
     uploaded_transcript_audio = st.file_uploader(
         "Or upload an audio/video file",
-        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
         key="transcript_page_upload",
     )
     chosen = transcript_audio or uploaded_transcript_audio
@@ -3151,20 +3094,11 @@ elif nav == "Audio & Transcript Analysis":
         )
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("Language", st.session_state.get("transcript_language") or "Auto-detected")
+            st.metric("Language", st.session_state.get("transcript_language") or "—")
         with c2:
             st.metric("Segments", len(st.session_state.get("transcript_segments") or []))
         with c3:
-            st.metric("ASR", "Whisper Multilingual")
-
-        anti_result = (st.session_state.get("last_analysis") or {}).get("anti_spoof") or {}
-        voice_label, voice_detail = voice_authenticity_label(anti_result)
-        if voice_label == "LIKELY AI-GENERATED":
-            st.error(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
-        elif voice_label == "LIKELY REAL / AUTHENTIC":
-            st.success(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
-        else:
-            st.warning(f"🎙️ VOICE VERDICT: {voice_label}\n\n{voice_detail}")
+            st.metric("ASR", "Whisper")
 
         segments = st.session_state.get("transcript_segments") or []
         if segments:
@@ -3264,7 +3198,7 @@ elif nav == "Demo Audio & Conversations":
     st.markdown("### Optional real-audio validation")
     demo_audio = st.file_uploader(
         "Attach actual demo audio for the complete voice + transcript pipeline",
-        type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+        type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov"],
         key="demo_real_audio",
     )
     if demo_audio and st.button("◉ RUN FULL DEMO AUDIO ANALYSIS", key="run_full_demo_audio", use_container_width=True):
@@ -3327,7 +3261,7 @@ else:
             name = st.text_input("Registered speaker name", placeholder="Example: User A", key="registry_name")
             samples = st.file_uploader(
                 "Upload 2–5 clean voice samples",
-                type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+                type=["wav", "mp3", "m4a", "flac", "ogg", "webm"],
                 accept_multiple_files=True,
                 key="speaker_enrollment_samples",
             )
@@ -3659,7 +3593,7 @@ else:
 
         eval_files = st.file_uploader(
             "Evaluation dataset",
-            type=["wav", "mp3", "m4a", "aac", "flac", "ogg", "oga", "opus", "amr", "aiff", "aif", "au", "caf", "wma", "mpga", "mpeg", "mpg", "mka", "mp4", "webm", "mov", "mkv", "avi", "3gp", "3gpp", "ts"],
+            type=["wav", "mp3", "m4a", "ogg", "flac", "mp4", "webm", "mov", "mkv", "avi"],
             accept_multiple_files=True,
             key="evaluation_dataset",
         )

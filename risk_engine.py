@@ -448,9 +448,33 @@ class RiskEngine:
         # ====================================================
         # AUTHORITY IMPERSONATION
         # ====================================================
+        #
+        # FIX (accuracy bug):
+        # The original condition was:
+        #
+        #     matches(text, AUTHORITY_PATTERNS)
+        #     or matches(text, HINDI_AUTHORITY_PATTERNS) and identity == "UNVERIFIED"
+        #
+        # Because `and` binds tighter than `or` in Python, this actually meant:
+        #
+        #     matches(text, AUTHORITY_PATTERNS)
+        #     or (matches(text, HINDI_AUTHORITY_PATTERNS) and identity == "UNVERIFIED")
+        #
+        # So an ENGLISH authority claim ("I'm calling from the bank") added risk
+        # even when the caller's identity was VERIFIED, while the Hindi authority
+        # patterns correctly respected the identity check. This made the score
+        # inconsistent between English and Hindi/Hinglish transcripts of the same
+        # scenario, which is exactly what feels like "random" output.
+        #
+        # Both pattern sets must be grouped together before the identity check
+        # is applied.
+        # ====================================================
 
         if (
-            matches(text, AUTHORITY_PATTERNS) or matches(text, HINDI_AUTHORITY_PATTERNS)
+            (
+                matches(text, AUTHORITY_PATTERNS)
+                or matches(text, HINDI_AUTHORITY_PATTERNS)
+            )
             and identity == "UNVERIFIED"
         ):
 
